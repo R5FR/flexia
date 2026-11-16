@@ -1,3 +1,6 @@
 [submodule "apps/flexia-cli"]
 	path = apps/flexia-cli
 	url = https://github.com/R5FR/flexia-cli.git
+[submodule "apps/flexia-api"]
+	path = apps/flexia-api
+	url = https://github.com/R5FR/flexia-api.git

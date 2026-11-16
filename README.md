@@ -24,6 +24,8 @@ Plan détaillé : `11_plan_rust.md` dans `flexia-data`. Lecture seule par défau
 | `psa-data` | lecture seule des données du pack : Firebird ODS 10, base véhicule `GPC`, dictionnaires `.DBZ`/`.ZCL`, descripteurs `SUPER.PC` / `.68K` / `.pro`, tables de mesures |
 | `vci` | transport vers l'interface : trait `Transport`, rejeu d'une capture (le backend Windows reste à écrire) |
 | `diag-core` | session de diagnostic, garde lecture seule, décodage des défauts et des mesures |
+| `apps/flexia-cli` (sous-module) | ligne de commande `flexia` |
+| `apps/flexia-api` (sous-module) | API HTTP locale et interface web `flexia-api` |
 
 ```sh
 cargo test                       # tests unitaires
