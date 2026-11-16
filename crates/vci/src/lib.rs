@@ -128,6 +128,33 @@ pub trait Transport {
     fn exchange(&mut self, req: &Request) -> Result<Response, VciError>;
 }
 
+/// Transport qui écrit chaque échange sur la sortie d'erreur, puis le délègue.
+pub struct Trace<T>(pub T);
+
+impl<T: Transport> Transport for Trace<T> {
+    fn exchange(&mut self, req: &Request) -> Result<Response, VciError> {
+        let debut = std::time::Instant::now();
+        let r = self.0.exchange(req);
+        let ms = debut.elapsed().as_millis();
+        match &r {
+            Ok(rep) => {
+                let octets: String = rep.data.iter().take(48).map(|b| format!(" {b:02x}")).collect();
+                eprintln!(
+                    "> {req}
+< état {:02x} [{} o]{octets}  ({ms} ms)",
+                    rep.etat,
+                    rep.data.len()
+                );
+            }
+            Err(e) => eprintln!(
+                "> {req}
+< ERREUR {e}  ({ms} ms)"
+            ),
+        }
+        r
+    }
+}
+
 impl<T: Transport + ?Sized> Transport for Box<T> {
     fn exchange(&mut self, req: &Request) -> Result<Response, VciError> {
         (**self).exchange(req)
