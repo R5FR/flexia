@@ -9,6 +9,8 @@
 //!
 //! La couche liaison USB (trames `40…44`, sommes de contrôle, fragments) est faite par le pilote.
 
+#[cfg(windows)]
+pub mod pp2000;
 pub mod replay;
 
 use std::fmt;
