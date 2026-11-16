@@ -161,3 +161,20 @@ fn ecritures_de_la_base_refusees() {
     }
     assert!(n > 2500, "{n}");
 }
+
+/// Phase de connexion : réinitialisation, démarrage du firmware, statut, version, voltmètre.
+#[test]
+fn connexion_vci() {
+    let Some((gpc, _, mut rejeu)) = donnees() else {
+        return;
+    };
+    rejeu.aller_a(2);
+    let mut s = Session::new(rejeu, &gpc);
+    assert_eq!(s.connecter().unwrap().version(), Some("V4.3.2"));
+    assert_eq!(s.connecter().unwrap().champs.len(), 5);
+    assert_eq!(s.statut().unwrap(), [0, 0]);
+    assert_eq!(s.version().unwrap().version(), Some("V4.3.2"));
+    s.transport_mut().aller_a(13);
+    s.statut().unwrap();
+    assert_eq!(s.voltmetre().unwrap(), 0x0b56);
+}

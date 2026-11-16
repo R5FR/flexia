@@ -17,6 +17,14 @@ pub mod sys {
     pub const PROTOCOLE: u8 = 0x04;
     /// Chargement d'un descripteur de configuration `C_*.68K`.
     pub const CONFIG: u8 = 0x05;
+    /// Retour au boot (réinitialisation de la VCI).
+    pub const RESET: u8 = 0x07;
+    /// Voltmètre.
+    pub const VOLTMETRE: u8 = 0x0b;
+    /// Démarrage du firmware applicatif ; répond par la chaîne de version.
+    pub const DEMARRER: u8 = 0x12;
+    /// Version du firmware applicatif.
+    pub const VERSION: u8 = 0xfa;
     /// Statut de communication.
     pub const STATUT: u8 = 0xfe;
 }
@@ -73,6 +81,43 @@ impl From<VciError> for Error {
 impl From<Refus> for Error {
     fn from(r: Refus) -> Self {
         Error::Refus(r)
+    }
+}
+
+/// Chaîne de version de la VCI : champs séparés par des zéros
+/// (nom du firmware, référence, version `V…`, fabricant, version du boot).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionVci {
+    pub champs: Vec<String>,
+}
+
+impl VersionVci {
+    pub fn parse(data: &[u8]) -> Self {
+        let champs = data
+            .split(|&c| c == 0)
+            .map(|c| {
+                c.iter()
+                    .map(|&b| {
+                        if b.is_ascii_graphic() || b == b' ' {
+                            b as char
+                        } else {
+                            '?'
+                        }
+                    })
+                    .collect::<String>()
+            })
+            .map(|c| c.trim().to_string())
+            .filter(|c| !c.is_empty())
+            .collect();
+        Self { champs }
+    }
+
+    /// Champ de version du firmware, ex. `V4.3.2`.
+    pub fn version(&self) -> Option<&str> {
+        self.champs
+            .iter()
+            .map(String::as_str)
+            .find(|c| c.starts_with('V') && c[1..].starts_with(|d: char| d.is_ascii_digit()))
     }
 }
 
@@ -180,6 +225,50 @@ impl<'a, T: Transport> Session<'a, T> {
     /// Statut de communication (2 octets).
     pub fn statut(&mut self) -> Result<Vec<u8>> {
         Ok(self.systeme(sys::STATUT, &[])?.data)
+    }
+
+    /// Initialise la VCI comme GestComm : retour au boot, puis démarrage du firmware applicatif.
+    pub fn connecter(&mut self) -> Result<VersionVci> {
+        let rep = self.systeme(sys::RESET, &[])?;
+        if !matches!(rep.etat, etat::ACCEPTE | etat::RESET) {
+            return Err(Error::Etat {
+                etat: rep.etat,
+                contexte: "réinitialisation de la VCI".into(),
+            });
+        }
+        let rep = self.systeme(sys::DEMARRER, &[])?;
+        if !matches!(rep.etat, etat::ACCEPTE | etat::REPONSE) {
+            return Err(Error::Etat {
+                etat: rep.etat,
+                contexte: "démarrage du firmware de la VCI".into(),
+            });
+        }
+        Ok(VersionVci::parse(&rep.data))
+    }
+
+    /// Version du firmware applicatif de la VCI.
+    pub fn version(&mut self) -> Result<VersionVci> {
+        let rep = self.systeme(sys::VERSION, &[])?;
+        if rep.etat != etat::REPONSE {
+            return Err(Error::Etat {
+                etat: rep.etat,
+                contexte: "version de la VCI".into(),
+            });
+        }
+        Ok(VersionVci::parse(&rep.data))
+    }
+
+    /// Voltmètre de la VCI (requête `04`, comme Lexia) : valeur brute sur 16 bits, échelle non établie.
+    pub fn voltmetre(&mut self) -> Result<u16> {
+        let rep = self.systeme(sys::VOLTMETRE, &[0x04])?;
+        match (rep.etat, rep.data.as_slice()) {
+            (etat::REPONSE, &[h, l]) => Ok(u16::from_be_bytes([h, l])),
+            (etat::REPONSE, d) => Err(Error::Reponse(format!("voltmètre : {} octets", d.len()))),
+            (e, _) => Err(Error::Etat {
+                etat: e,
+                contexte: "voltmètre".into(),
+            }),
+        }
     }
 
     /// Ouvre le canal d'un type de calculateur : statut, chargement des descripteurs `C_` puis `P_*.68K`, `INIT`.
@@ -290,6 +379,14 @@ impl<'a, T: Transport> Session<'a, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_vci() {
+        let v = VersionVci::parse(b"APPLI_X REF1  V1.2.3 @FAB 01.02 ");
+        assert_eq!(v.champs, ["APPLI_X", "REF1", "V1.2.3", "@FAB", "01.02"]);
+        assert_eq!(v.version(), Some("V1.2.3"));
+        assert_eq!(VersionVci::parse(b"").version(), None);
+    }
 
     #[test]
     fn defauts() {
