@@ -78,11 +78,7 @@ impl Dico {
         let kind = match magic {
             MAGIC_DBZ => Kind::Dbz,
             MAGIC_ZCL => Kind::Zcl,
-            m => {
-                return Err(Error::Format(format!(
-                    "magic de dictionnaire inconnu 0x{m:08x}"
-                )))
-            }
+            m => return Err(Error::Format(format!("magic de dictionnaire inconnu 0x{m:08x}"))),
         };
         if u64::from(data_offset) != u64::from(header_size) + 4 * u64::from(count) {
             return Err(Error::Format("incohérence data_offset / count".into()));
@@ -175,15 +171,8 @@ mod tests {
 
     #[test]
     fn zcl() {
-        let d = Dico::from_bytes(
-            synth(MAGIC_ZCL, 0x6C, &[b"a", b"", b"\xe9t\xe9"]),
-            Codepage::Cp1252,
-        )
-        .unwrap();
-        assert_eq!(
-            (d.kind, d.len(), d.name.as_deref()),
-            (Kind::Zcl, 3, Some("CITTD=0"))
-        );
+        let d = Dico::from_bytes(synth(MAGIC_ZCL, 0x6C, &[b"a", b"", b"\xe9t\xe9"]), Codepage::Cp1252).unwrap();
+        assert_eq!((d.kind, d.len(), d.name.as_deref()), (Kind::Zcl, 3, Some("CITTD=0")));
         assert_eq!(d.get(2).as_deref(), Some("été"));
         let c = d.check();
         assert!(c.monotone && c.first_at_data_offset && c.in_bounds && c.last_string_ends_at_eof);

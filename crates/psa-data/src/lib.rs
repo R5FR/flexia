@@ -61,9 +61,7 @@ pub(crate) mod rd {
             .ok_or(Error::Truncated { what, offset: o })
     }
     pub fn u8(b: &[u8], o: usize, what: &'static str) -> Result<u8> {
-        b.get(o)
-            .copied()
-            .ok_or(Error::Truncated { what, offset: o })
+        b.get(o).copied().ok_or(Error::Truncated { what, offset: o })
     }
     pub fn u16(b: &[u8], o: usize, what: &'static str) -> Result<u16> {
         Ok(u16::from_le_bytes(take(b, o, what)?))

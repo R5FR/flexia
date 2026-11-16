@@ -63,9 +63,7 @@ pub struct Dictionnaire {
 }
 
 fn hex_octets(s: &str) -> Option<Vec<u8>> {
-    s.split_whitespace()
-        .map(|t| u8::from_str_radix(t, 16).ok())
-        .collect()
+    s.split_whitespace().map(|t| u8::from_str_radix(t, 16).ok()).collect()
 }
 
 impl Dictionnaire {
@@ -79,9 +77,7 @@ impl Dictionnaire {
             if l.trim().is_empty() {
                 continue;
             }
-            let err = |quoi: &str| {
-                Error::Format(format!("dictionnaire de mesures, ligne {} : {quoi}", n + 1))
-            };
+            let err = |quoi: &str| Error::Format(format!("dictionnaire de mesures, ligne {} : {quoi}", n + 1));
             let c: Vec<&str> = l.split('\t').collect();
             if c.len() < 11 {
                 return Err(err("11 colonnes attendues"));
@@ -109,9 +105,7 @@ impl Dictionnaire {
     }
 
     pub fn trames_of(&self, ecu_type_id: i64) -> impl Iterator<Item = &Trame> {
-        self.trames
-            .iter()
-            .filter(move |t| t.ecu_type_id == ecu_type_id)
+        self.trames.iter().filter(move |t| t.ecu_type_id == ecu_type_id)
     }
 
     /// Trame d'un type de calculateur dont la requête est exactement `requete`.
@@ -139,10 +133,7 @@ mod tests {
         let t = d.trame(9, &[0xa1, 0x80, 0x01]).unwrap();
         assert_eq!(t.fiches.len(), 4);
         let rep = [0x01, 0x10, 0x05, 0x00, 0x05, 0x61, 0xff, 0x1e, 0x47];
-        assert_eq!(
-            t.decode(&rep),
-            vec![("A", Some(960.0)), ("B", Some(31.0)), ("C", None)]
-        );
+        assert_eq!(t.decode(&rep), vec![("A", Some(960.0)), ("B", Some(31.0)), ("C", None)]);
         assert!(d.trame(9, &[]).is_none());
         assert!(d.trame(8, &[0xa1, 0x80, 0x01]).is_none());
     }

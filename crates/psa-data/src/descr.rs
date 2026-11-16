@@ -19,8 +19,7 @@ pub struct PcRow {
 }
 
 fn hex2(s: &str) -> Option<u8> {
-    (s.len() == 2 && s.bytes().all(|c| c.is_ascii_hexdigit()))
-        .then(|| u8::from_str_radix(s, 16).ok())?
+    (s.len() == 2 && s.bytes().all(|c| c.is_ascii_hexdigit())).then(|| u8::from_str_radix(s, 16).ok())?
 }
 
 pub fn parse_pc(data: &[u8]) -> Vec<PcRow> {
@@ -80,11 +79,7 @@ fn cherche_ligne(r: &[char]) -> Option<Ligne> {
         while j < r.len() && r[j].is_whitespace() {
             j += 1;
         }
-        let n = r[j..]
-            .iter()
-            .take(6)
-            .take_while(|c| c.is_ascii_digit())
-            .count();
+        let n = r[j..].iter().take(6).take_while(|c| c.is_ascii_digit()).count();
         if n >= 3 {
             let bauds = r[j..j + n].iter().collect::<String>().parse().ok()?;
             return Some(Ligne {
@@ -109,12 +104,7 @@ pub fn parse_68k(data: &[u8]) -> Vec<Rec68k> {
         .filter(|r| r.iter().any(|&c| c != '-'))
         .map(|r| Rec68k {
             raw: r.iter().collect(),
-            id: r
-                .iter()
-                .take(6)
-                .collect::<String>()
-                .trim_matches('-')
-                .to_string(),
+            id: r.iter().take(6).collect::<String>().trim_matches('-').to_string(),
             ligne: cherche_ligne(r),
         })
         .collect()
@@ -179,10 +169,7 @@ pub fn parse_pro(b: &[u8]) -> Result<Vec<ProRec>> {
     while i + 4 <= b.len() {
         let tag = b[i] as char;
         if b[i] == b'C' && b[i + 1].is_ascii_uppercase() {
-            let (a, c) = (
-                rd::u16(b, i + 2, ".pro bloc")?,
-                rd::u16(b, i + 4, ".pro bloc")?,
-            );
+            let (a, c) = (rd::u16(b, i + 2, ".pro bloc")?, rd::u16(b, i + 4, ".pro bloc")?);
             recs.push(ProRec::Bloc {
                 tag: format!("C{}", b[i + 1] as char),
                 a,
@@ -190,10 +177,7 @@ pub fn parse_pro(b: &[u8]) -> Result<Vec<ProRec>> {
             });
             i += 6;
         } else if tag == 'D' || tag == 'A' {
-            recs.push(ProRec::Court {
-                tag,
-                valeur: b[i + 1],
-            });
+            recs.push(ProRec::Court { tag, valeur: b[i + 1] });
             i += 2;
         } else if tag == 'Q' {
             let (lo, hi) = (rd::u16(b, i + 2, ".pro Q")?, rd::u16(b, i + 4, ".pro Q")?);
@@ -284,8 +268,7 @@ mod tests {
     #[test]
     fn pro() {
         let b = [
-            b'C', b'U', 1, 0, 2, 0, b'D', 7, b'Q', 1, 0xA0, 0x06, 0xDA, 0x18, b'P', 1, 0xA7, 0x06,
-            0, 0, 0, 0,
+            b'C', b'U', 1, 0, 2, 0, b'D', 7, b'Q', 1, 0xA0, 0x06, 0xDA, 0x18, b'P', 1, 0xA7, 0x06, 0, 0, 0, 0,
         ];
         let r = parse_pro(&b).unwrap();
         assert_eq!(
@@ -296,13 +279,7 @@ mod tests {
                 b: 2
             }
         );
-        assert_eq!(
-            r[1],
-            ProRec::Court {
-                tag: 'D',
-                valeur: 7
-            }
-        );
+        assert_eq!(r[1], ProRec::Court { tag: 'D', valeur: 7 });
         assert_eq!(
             r[2],
             ProRec::Val {

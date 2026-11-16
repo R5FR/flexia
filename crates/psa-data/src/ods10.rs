@@ -122,14 +122,10 @@ impl Ods10 {
         let mut data = rd::slice(rec, 22, usize::MAX).to_vec();
         let mut next = (rd::i32(rec, 16, "rhdf")?, rd::u16(rec, 20, "rhdf")?);
         for _ in 0..self.npages.max(1) * 256 {
-            let page = usize::try_from(next.0)
-                .map_err(|_| Error::Format("page de fragment négative".into()))?;
+            let page = usize::try_from(next.0).map_err(|_| Error::Format("page de fragment négative".into()))?;
             let frag = self.slot(page, next.1 as usize)?;
             if rd::u16(frag, 10, "fragment")? & F_INCOMPLETE != 0 {
-                next = (
-                    rd::i32(frag, 16, "fragment")?,
-                    rd::u16(frag, 20, "fragment")?,
-                );
+                next = (rd::i32(frag, 16, "fragment")?, rd::u16(frag, 20, "fragment")?);
                 data.extend_from_slice(rd::slice(frag, 22, usize::MAX));
             } else {
                 data.extend_from_slice(rd::slice(frag, 13, usize::MAX));
@@ -351,10 +347,7 @@ impl Database {
         }
         for r in db.ods.records(REL_RELATIONS)? {
             let f = db.fmt(REL_RELATIONS as i16, i16::from(r.format))?;
-            let (rid, name) = (
-                db.field(&r.data, f, 3, false)?,
-                db.field(&r.data, f, 8, false)?,
-            );
+            let (rid, name) = (db.field(&r.data, f, 3, false)?, db.field(&r.data, f, 8, false)?);
             if let (Some(rid), Value::Text(name)) = (rid.as_i64(), name) {
                 db.rel_by_name.insert(name, rid);
             }
@@ -403,9 +396,7 @@ impl Database {
         let v: i64 = match d.dtype {
             1 => {
                 return Ok(Value::Text(
-                    decode(b, self.codepage)
-                        .trim_end_matches(is_py_space)
-                        .to_string(),
+                    decode(b, self.codepage).trim_end_matches(is_py_space).to_string(),
                 ))
             }
             3 => {
@@ -415,16 +406,8 @@ impl Database {
             8 => i64::from(rd::i16(b, 0, "SMALLINT")?),
             9 | 14 | 15 => i64::from(rd::i32(b, 0, "INTEGER")?),
             19 => rd::i64(b, 0, "BIGINT")?,
-            11 => {
-                return Ok(Value::Float(f64::from(f32::from_bits(rd::u32(
-                    b, 0, "FLOAT",
-                )?))))
-            }
-            12 => {
-                return Ok(Value::Float(
-                    f64::from_bits(rd::i64(b, 0, "DOUBLE")? as u64),
-                ))
-            }
+            11 => return Ok(Value::Float(f64::from(f32::from_bits(rd::u32(b, 0, "FLOAT")?)))),
+            12 => return Ok(Value::Float(f64::from_bits(rd::i64(b, 0, "DOUBLE")? as u64))),
             16 => {
                 let (days, frac) = (rd::i32(b, 0, "TIMESTAMP")?, rd::u32(b, 4, "TIMESTAMP")?);
                 return Ok(Value::Text(format!(
@@ -488,11 +471,7 @@ impl Database {
             .max_by_key(|(k, _)| k.1)
             .map(|(_, f)| f)
             .ok_or_else(|| Error::Format(format!("aucun format pour {table}")))?;
-        Ok(self
-            .columns(table)
-            .into_iter()
-            .zip(f.iter().copied())
-            .collect())
+        Ok(self.columns(table).into_iter().zip(f.iter().copied()).collect())
     }
 
     /// Lignes d'une table. `blobs` : lire aussi le contenu des blobs (sinon `Null`).
@@ -504,9 +483,7 @@ impl Database {
             let f = self.fmt(rid, i16::from(r.format))?;
             let mut row = Row::with_capacity(f.len());
             for (i, d) in f.iter().enumerate() {
-                let name = names
-                    .get(i)
-                    .map_or_else(|| format!("F{i}"), |n| n.to_string());
+                let name = names.get(i).map_or_else(|| format!("F{i}"), |n| n.to_string());
                 row.push((name, self.value(&r.data, d, i, blobs)?));
             }
             out.push(row);
@@ -526,10 +503,7 @@ mod tests {
 
     #[test]
     fn rle() {
-        assert_eq!(
-            Ods10::rle(&[3, b'a', b'b', b'c', 0xFD, b'z', 1, b'!']),
-            b"abczzz!"
-        );
+        assert_eq!(Ods10::rle(&[3, b'a', b'b', b'c', 0xFD, b'z', 1, b'!']), b"abczzz!");
         assert_eq!(Ods10::rle(&[5, b'a']), b"a");
         assert_eq!(Ods10::rle(&[0xFE]), b"");
     }

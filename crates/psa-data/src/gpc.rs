@@ -92,17 +92,11 @@ fn req(r: &Row, table: &str, name: &str) -> Result<i64> {
 }
 
 fn text(r: &Row, name: &str) -> String {
-    col(r, name)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string()
+    col(r, name).and_then(Value::as_str).unwrap_or("").to_string()
 }
 
 fn bytes(r: &Row, name: &str) -> Vec<u8> {
-    col(r, name)
-        .and_then(Value::as_bytes)
-        .unwrap_or(&[])
-        .to_vec()
+    col(r, name).and_then(Value::as_bytes).unwrap_or(&[]).to_vec()
 }
 
 impl Gpc {
@@ -179,9 +173,7 @@ impl Gpc {
         for r in &db.rows("COMMAND", true)? {
             let (cal, com) = (bytes(r, "COMECU"), bytes(r, "COMCODE"));
             let (&[code_cal], &[code_com]) = (cal.as_slice(), com.as_slice()) else {
-                return Err(Error::Format(
-                    "COMMAND : COMECU / COMCODE ne font pas un octet".into(),
-                ));
+                return Err(Error::Format("COMMAND : COMECU / COMCODE ne font pas un octet".into()));
             };
             commands.push(Command {
                 id: req(r, "COMMAND", "COMID")?,
@@ -230,9 +222,7 @@ impl Gpc {
 
     /// Commandes d'un type de calculateur, dans l'ordre de la base.
     pub fn commands_of(&self, ecu_type_id: i64) -> impl Iterator<Item = &Command> {
-        self.commands
-            .iter()
-            .filter(move |c| c.ecu_type_id == ecu_type_id)
+        self.commands.iter().filter(move |c| c.ecu_type_id == ecu_type_id)
     }
 
     pub fn command(&self, ecu_type_id: i64, name: &str) -> Option<&Command> {

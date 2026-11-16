@@ -31,10 +31,7 @@ fn fichiers(dir: &Path, exts: &[&str], out: &mut Vec<PathBuf>) {
 }
 
 fn rel(p: &Path, base: &Path) -> String {
-    p.strip_prefix(base)
-        .unwrap_or(p)
-        .to_string_lossy()
-        .replace('\\', "/")
+    p.strip_prefix(base).unwrap_or(p).to_string_lossy().replace('\\', "/")
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -74,11 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     h.update(b"\x1e");
                 }
-                lignes.push(format!(
-                    "fdb\t{base}/{t}\t{}\t{}",
-                    rows.len(),
-                    hex(&h.finalize())
-                ));
+                lignes.push(format!("fdb\t{base}/{t}\t{}\t{}", rows.len(), hex(&h.finalize())));
             }
         }
     }
@@ -119,11 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fichiers(&com, &["pc", "68k", "pro"], &mut fs);
         for p in fs {
             let data = std::fs::read(&p)?;
-            let ext = p
-                .extension()
-                .unwrap()
-                .to_string_lossy()
-                .to_ascii_lowercase();
+            let ext = p.extension().unwrap().to_string_lossy().to_ascii_lowercase();
             let mut s = String::new();
             let n;
             match ext.as_str() {
