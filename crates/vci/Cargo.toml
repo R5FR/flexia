@@ -1,0 +1,9 @@
+[package]
+name = "vci"
+description = "Transport vers l'interface de diagnostic (VCI) : trait, rejeu d'une capture"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde_json = "1"
