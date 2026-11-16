@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/psa-data", "crates/vci", "crates/diag-core"]
+members = ["crates/psa-data", "crates/vci", "crates/diag-core", "apps/flexia-cli"]
 
 [workspace.package]
 version = "0.1.0"

@@ -128,6 +128,12 @@ pub trait Transport {
     fn exchange(&mut self, req: &Request) -> Result<Response, VciError>;
 }
 
+impl<T: Transport + ?Sized> Transport for Box<T> {
+    fn exchange(&mut self, req: &Request) -> Result<Response, VciError> {
+        (**self).exchange(req)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
