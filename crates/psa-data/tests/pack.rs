@@ -188,3 +188,31 @@ fn gpc_injection_s2000pm1() {
         .iter()
         .any(|(f, _, t)| f.id == 47 && t.id == 356));
 }
+
+/// `FLEXIA_MESURES` : dictionnaire TSV produit par `scripts/dico_mesures.py`.
+#[test]
+fn mesures_injection_ralenti() {
+    use psa_data::mesures::Dictionnaire;
+    let Some(tsv) = dossier("FLEXIA_MESURES") else {
+        return;
+    };
+    let d = Dictionnaire::open(tsv).unwrap();
+    assert_eq!(d.trames.iter().map(|t| t.fiches.len()).sum::<usize>(), 870);
+    // réponse capturée le 2026-11-13 à 18:42:17 (ralenti) : régime, tension batterie, température d'eau
+    let t = d.trame(356, &[0xc2, 0x80, 0x01]).unwrap();
+    let rep = [
+        0x01, 0x10, 0x0f, 0x00, 0x05, 0x61, 0xff, 0x1e, 0x8e, 0x47, 0x01, 0x01, 0x00, 0x00, 0x23,
+        0x18, 0x00, 0x00, 0x01, 0x00,
+    ];
+    let v = t.decode(&rep);
+    let val = |n: &str| (v.iter().find(|(k, _)| *k == n).unwrap().1.unwrap() * 1e4).round() / 1e4;
+    assert_eq!(
+        (
+            val("REGIMEMOTEUR"),
+            val("TENSIONBATTERIE"),
+            val("TEMPERATUREEAU")
+        ),
+        (960.0, 14.2, 31.0)
+    );
+    assert_eq!(v.len(), 13);
+}
