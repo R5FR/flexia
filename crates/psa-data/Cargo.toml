@@ -1,0 +1,12 @@
+[package]
+name = "psa-data"
+description = "Lecture seule des données PSA dans la copie du pack de l'utilisateur (rien n'est embarqué)"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+encoding_rs = "0.8"
+
+[dev-dependencies]
+sha2 = "0.10"

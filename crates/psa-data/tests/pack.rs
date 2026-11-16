@@ -1,0 +1,138 @@
+//! Tests sur les fichiers réels du pack (mêmes contrôles que `parsers/test_parsers.py`).
+//! Ignorés si les variables d'environnement ne sont pas définies :
+//! `FLEXIA_LEXIA` (…/APP/LEXIA), `FLEXIA_COMMON` (…/APP/COMMON), `FLEXIA_FDB` (copies des `.FDB`).
+
+use psa_data::descr::{self, ProRec};
+use psa_data::dico::{Dico, Kind};
+use psa_data::ods10::{col, Database};
+use std::path::PathBuf;
+
+fn dossier(var: &str) -> Option<PathBuf> {
+    let d = std::env::var_os(var).map(PathBuf::from);
+    if d.is_none() {
+        eprintln!("ignoré : {var} non défini");
+    }
+    d
+}
+
+#[test]
+fn dictionnaires() {
+    let Some(lx) = dossier("FLEXIA_LEXIA") else {
+        return;
+    };
+    for (f, n, k) in [
+        ("DICO/CITTTFR.DBZ", 82, Kind::Dbz),
+        ("DICO/citroen/dicoSFR.zcl", 5801, Kind::Zcl),
+        ("DICO/citroen/dicodRU.zcl", 14846, Kind::Zcl),
+    ] {
+        let d = Dico::open(lx.join(f)).unwrap();
+        let c = d.check();
+        assert!(
+            d.kind == k && d.len() == n && c.monotone && c.last_string_ends_at_eof,
+            "{f}"
+        );
+    }
+    let d = Dico::open(lx.join("DICO/citroen/dicodFR.zcl")).unwrap();
+    assert_eq!(d.get(3030).as_deref(), Some("consommation instantanée"));
+}
+
+#[test]
+fn descripteurs_vci() {
+    let Some(com) = dossier("FLEXIA_COMMON") else {
+        return;
+    };
+    let lire = |f: &str| std::fs::read(com.join(f)).unwrap();
+    let rows = descr::parse_pc(&lire("SUPER.PC"));
+    assert_eq!(rows.len(), 39);
+    assert_eq!(
+        (rows[1].libelle.as_str(), rows[1].delai),
+        ("BOOT - ECHO", 4000)
+    );
+    assert!(descr::parse_68k(&lire("P_5B.68K"))
+        .iter()
+        .any(|r| r.ligne.is_some_and(|l| l.bauds == 10400)));
+    for (f, tag, index, valeur) in [
+        ("P_UDSMCV.pro", 'Q', 1, 0x18DA_06A0),
+        ("P_CAN.pro", 'P', 1, 0x6A7),
+        ("P_KWPOnCAN.pro", 'f', 5, 0xF1),
+    ] {
+        let recs = descr::parse_pro(&lire(f)).unwrap();
+        assert!(
+            !recs.iter().any(|r| matches!(r, ProRec::Inconnu { .. })),
+            "{f}"
+        );
+        // comme le dictionnaire Python : la dernière valeur de (lettre, index) l'emporte
+        let v = recs.iter().rev().find_map(|r| match r {
+            ProRec::Val {
+                tag: t,
+                index: i,
+                valeur,
+            } if (*t, *i) == (tag, index) => Some(*valeur),
+            _ => None,
+        });
+        assert_eq!(v, Some(valeur), "{f}");
+    }
+}
+
+#[test]
+fn firebird_gpc() {
+    let Some(fdb) = dossier("FLEXIA_FDB") else {
+        return;
+    };
+    let db = Database::open(fdb.join("GPC.FDB")).unwrap();
+    assert_eq!(db.tables().len(), 27);
+    let prot = db.rows("PROTOCOL", true).unwrap();
+    let ligne = |id: i64| {
+        prot.iter()
+            .find(|r| col(r, "PROTID").and_then(|v| v.as_i64()) == Some(id))
+            .unwrap()
+    };
+
+    // blob de niveau 1
+    let b = col(ligne(260), "PROTFILE3")
+        .and_then(|v| v.as_bytes())
+        .unwrap();
+    assert!(b.len() == 7515 && b.starts_with(b"P55011"));
+
+    // P_INJFIG : services KWP par Code Com
+    let b = col(ligne(60), "PROTFILE3")
+        .and_then(|v| v.as_bytes())
+        .unwrap();
+    let (cm, _) = descr::commandes_68k(&descr::parse_68k(b));
+    assert_eq!(cm["01"].d, ["E81"]);
+    assert_eq!(cm["07"].t, ["E10"]);
+    assert_eq!(
+        (
+            cm["07"].d[0].as_str(),
+            cm["0C"].d[0].as_str(),
+            cm["0E"].d[0].as_str()
+        ),
+        ("E21", "E17", "E14")
+    );
+
+    // tous les blobs P_*.pro de la base suivent la grammaire .pro
+    let mut n = 0;
+    for r in &prot {
+        for i in 1..=5 {
+            let nom = col(r, &format!("PROTFNAME{i}"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let Some(b) = col(r, &format!("PROTFILE{i}")).and_then(|v| v.as_bytes()) else {
+                continue;
+            };
+            if nom.to_ascii_uppercase().starts_with("P_")
+                && nom.to_ascii_lowercase().ends_with(".pro")
+            {
+                n += 1;
+                assert!(
+                    !descr::parse_pro(b)
+                        .unwrap()
+                        .iter()
+                        .any(|x| matches!(x, ProRec::Inconnu { .. })),
+                    "{nom}"
+                );
+            }
+        }
+    }
+    assert!(n > 0);
+}
