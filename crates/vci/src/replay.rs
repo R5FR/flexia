@@ -19,6 +19,8 @@ pub enum Mode {
     Strict,
     /// La première requête identique à partir de la position courante.
     Recherche,
+    /// Comme `Recherche`, mais reprend au début de la capture une fois la fin atteinte (démonstration).
+    Boucle,
 }
 
 pub struct Replay {
@@ -103,11 +105,14 @@ impl Transport for Replay {
                 }
                 None => return Err(VciError::Rejeu(format!("fin de la capture, requête « {req} »"))),
             },
-            Mode::Recherche => self.echanges[self.pos..]
-                .iter()
-                .position(|e| e.req == *req)
-                .map(|k| self.pos + k)
-                .ok_or_else(|| VciError::Rejeu(format!("aucun échange « {req} » après le n° {}", self.pos)))?,
+            Mode::Recherche | Mode::Boucle => {
+                let n = self.echanges.len();
+                let fin = if self.mode == Mode::Boucle { self.pos + n } else { n };
+                (self.pos..fin)
+                    .map(|k| k % n.max(1))
+                    .find(|&k| self.echanges.get(k).is_some_and(|e| e.req == *req))
+                    .ok_or_else(|| VciError::Rejeu(format!("aucun échange « {req} » après le n° {}", self.pos)))?
+            }
         };
         self.pos = i + 1;
         Ok(self.echanges[i].rep.clone())
@@ -144,5 +149,19 @@ mod tests {
         assert_eq!(r.exchange(&Request::new(0x8e, 7, [0xc2, 0x80, 1])).unwrap().etat, 1);
         assert_eq!(r.exchange(&Request::new(0, 0xfe, [])).unwrap().data, [0, 0]);
         assert!(Replay::parse("{\"code_cal\": \"zz\"}", Mode::Strict).is_err());
+    }
+
+    #[test]
+    fn boucle() {
+        let mut r = Replay::parse(J, Mode::Boucle).unwrap();
+        for _ in 0..3 {
+            assert_eq!(
+                r.exchange(&Request::new(0x8e, 7, [0xc2, 0x80, 1])).unwrap().data,
+                [1, 0x10]
+            );
+        }
+        assert_eq!(r.exchange(&Request::new(0, 0xfe, [])).unwrap().data, [0, 0]);
+        assert_eq!(r.exchange(&Request::new(0, 0xfe, [])).unwrap().data, [1, 0]);
+        assert!(r.exchange(&Request::new(0x8e, 7, [0xc0, 0x80, 1])).is_err());
     }
 }

@@ -155,6 +155,12 @@ impl<T: Transport> Transport for Trace<T> {
     }
 }
 
+impl<T: Transport + ?Sized> Transport for &mut T {
+    fn exchange(&mut self, req: &Request) -> Result<Response, VciError> {
+        (**self).exchange(req)
+    }
+}
+
 impl<T: Transport + ?Sized> Transport for Box<T> {
     fn exchange(&mut self, req: &Request) -> Result<Response, VciError> {
         (**self).exchange(req)
