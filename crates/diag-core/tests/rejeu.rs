@@ -97,7 +97,7 @@ fn session_injection() {
 
     // fin : FIN_DIAG
     assert_eq!(s.transport().echanges()[s.transport().position()].heure, "18:44:19.671");
-    s.fermer(canal).unwrap();
+    assert!(s.fermer(canal).unwrap(), "statut 00 00 attendu après FIN_DIAG");
 }
 
 #[test]

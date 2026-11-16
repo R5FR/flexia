@@ -7,6 +7,10 @@
 //! - lecture : `DeviceIoControl(0x222010)`, entrée = la taille reçue (u32), sortie = en-tête de 20 octets + données.
 //!
 //! Le périphérique est ouvert puis refermé à chaque échange, comme le fait GestComm.
+//!
+//! Vérifié dans le pilote UMDF (`VCommUsb.dll`) : entrée ≥ 12 o et ≥ 12 + taille, taille ≤ 8 012 ; la réponse
+//! est gardée par le pilote jusqu'à sa lecture ; le délai est en millisecondes et ne sert qu'à borner
+//! l'attente côté PC (il n'est pas transmis à la VCI) ; `0x222014` rend la version du pilote sans trafic USB.
 
 use crate::{Request, Response, Transport, VciError, BLOC_MAX, CAL_SYSTEME};
 use std::ptr::{null, null_mut};
@@ -29,6 +33,7 @@ const INTERFACE: GUID = GUID {
 };
 const IOCTL_ENVOI: u32 = 0x0022_200C;
 const IOCTL_LECTURE: u32 = 0x0022_2010;
+const IOCTL_VERSION_PILOTE: u32 = 0x0022_2014;
 /// En-tête des données lues (écho de la requête, Code cal, Code Com, taille, état).
 const ENTETE: usize = 20;
 
@@ -79,6 +84,52 @@ pub fn detecter() -> Result<Vec<String>, VciError> {
         SetupDiDestroyDeviceInfoList(set);
     }
     Ok(chemins)
+}
+
+/// Version annoncée par le pilote Windows (ex. `VCommUSB UMDF Driver V1.00.00`).
+/// Ouvre le périphérique et interroge le pilote, qui répond sans rien envoyer à la VCI.
+pub fn version_pilote(chemin: &str) -> Result<String, VciError> {
+    let h = ouvrir(&chemin.encode_utf16().chain(std::iter::once(0)).collect::<Vec<u16>>())?;
+    let mut sortie = [0u8; 64];
+    let mut recu = 0u32;
+    // SAFETY : tampon de sortie valide pour la longueur passée ; pas de tampon d'entrée.
+    let ok = unsafe {
+        DeviceIoControl(
+            h.0,
+            IOCTL_VERSION_PILOTE,
+            null(),
+            0,
+            sortie.as_mut_ptr().cast(),
+            sortie.len() as u32,
+            &mut recu,
+            null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(erreur("version du pilote"));
+    }
+    let texte = &sortie[..(recu as usize).min(sortie.len())];
+    Ok(String::from_utf8_lossy(texte.split(|&c| c == 0).next().unwrap_or(&[])).into_owned())
+}
+
+/// Ouvre le périphérique comme GestComm : lecture et écriture, partage complet.
+fn ouvrir(chemin: &[u16]) -> Result<Poignee, VciError> {
+    // SAFETY : chemin terminé par un zéro.
+    let h = unsafe {
+        CreateFileW(
+            chemin.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            null(),
+            OPEN_EXISTING,
+            0,
+            null_mut(),
+        )
+    };
+    if h == INVALID_HANDLE_VALUE {
+        return Err(erreur("ouverture de la VCI"));
+    }
+    Ok(Poignee(h))
 }
 
 struct Poignee(HANDLE);
@@ -158,22 +209,7 @@ impl Transport for Pp2000 {
                 req.data.len()
             )));
         }
-        // SAFETY : chemin terminé par un zéro.
-        let h = unsafe {
-            CreateFileW(
-                self.chemin.as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
-                FILE_SHARE_READ | FILE_SHARE_WRITE,
-                null(),
-                OPEN_EXISTING,
-                0,
-                null_mut(),
-            )
-        };
-        if h == INVALID_HANDLE_VALUE {
-            return Err(erreur("ouverture de la VCI"));
-        }
-        let h = Poignee(h);
+        let h = ouvrir(&self.chemin)?;
 
         let mut statut = [0u8; 8];
         let n = self.ioctl(&h, IOCTL_ENVOI, &tampon_envoi(req, self.delai(req)), &mut statut)?;

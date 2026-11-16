@@ -11,6 +11,11 @@ use std::collections::BTreeMap;
 use std::fmt;
 use vci::{etat, Request, Response, Transport, VciError, CAL_SYSTEME};
 
+/// Pause entre le retour au boot et le démarrage du firmware (`Sleep(100)` de GestComm).
+pub const PAUSE_APRES_RESET: std::time::Duration = std::time::Duration::from_millis(100);
+/// Statut de la VCI sans session calculateur ouverte ; `01 00` quand une session est ouverte.
+pub const STATUT_REPOS: [u8; 2] = [0, 0];
+
 /// Commandes système de la VCI utilisées.
 pub mod sys {
     /// Chargement d'un descripteur de protocole `P_*.68K`.
@@ -227,15 +232,12 @@ impl<'a, T: Transport> Session<'a, T> {
         Ok(self.systeme(sys::STATUT, &[])?.data)
     }
 
-    /// Initialise la VCI comme GestComm : retour au boot, puis démarrage du firmware applicatif.
+    /// Initialise la VCI comme GestComm (`CUSBCommDriver`) : retour au boot, pause de 100 ms, puis démarrage
+    /// du firmware applicatif. Comme lui, l'état rendu par le retour au boot n'est pas examiné (`0c` ou `03`
+    /// constatés). Le retour au boot met aussi fin à une session calculateur restée ouverte dans la VCI.
     pub fn connecter(&mut self) -> Result<VersionVci> {
-        let rep = self.systeme(sys::RESET, &[])?;
-        if !matches!(rep.etat, etat::ACCEPTE | etat::RESET) {
-            return Err(Error::Etat {
-                etat: rep.etat,
-                contexte: "réinitialisation de la VCI".into(),
-            });
-        }
+        self.systeme(sys::RESET, &[])?;
+        std::thread::sleep(PAUSE_APRES_RESET);
         let rep = self.systeme(sys::DEMARRER, &[])?;
         if !matches!(rep.etat, etat::ACCEPTE | etat::REPONSE) {
             return Err(Error::Etat {
@@ -346,9 +348,12 @@ impl<'a, T: Transport> Session<'a, T> {
         Ok(ReponseEcu { brut: rep.data })
     }
 
-    /// Fin de communication avec le calculateur.
-    pub fn fermer(&mut self, canal: Canal) -> Result<()> {
-        self.commande(&canal, "FIN_DIAG", &[]).map(|_| ())
+    /// Fin de communication avec le calculateur, puis lecture du statut de la VCI.
+    /// Renvoie `true` si la VCI n'a plus de session ouverte (statut `00 00`). Tant qu'une session est
+    /// ouverte, c'est la VCI qui l'entretient auprès du calculateur : elle ne s'éteint pas d'elle-même.
+    pub fn fermer(&mut self, canal: Canal) -> Result<bool> {
+        self.commande(&canal, "FIN_DIAG", &[])?;
+        Ok(self.statut()? == STATUT_REPOS)
     }
 
     pub fn identification(&mut self, canal: &Canal) -> Result<ReponseEcu> {
@@ -382,7 +387,7 @@ mod tests {
 
     #[test]
     fn version_vci() {
-        let v = VersionVci::parse(b"APPLI_X REF1  V1.2.3 @FAB 01.02 ");
+        let v = VersionVci::parse(b"APPLI_X\0REF1 \0V1.2.3\0@FAB\x0001.02\0");
         assert_eq!(v.champs, ["APPLI_X", "REF1", "V1.2.3", "@FAB", "01.02"]);
         assert_eq!(v.version(), Some("V1.2.3"));
         assert_eq!(VersionVci::parse(b"").version(), None);
