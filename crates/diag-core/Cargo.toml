@@ -1,0 +1,10 @@
+[package]
+name = "diag-core"
+description = "Session de diagnostic : canaux, commandes nommées, garde lecture seule, décodage"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+psa-data = { path = "../psa-data" }
+vci = { path = "../vci" }
