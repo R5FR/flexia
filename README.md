@@ -14,14 +14,20 @@ Repo principal : il contiendra le cœur (lecture des données PSA, transport VCI
 
 Plan détaillé : `11_plan_rust.md` dans `flexia-data`. Lecture seule par défaut ; toute écriture est déverrouillée opération par opération.
 
-État : **étape 1 en cours**.
+État : **étapes 1 et 2 faites**.
 
 ## État
-`crates/psa-data` : lecture seule des données du pack (Firebird ODS 10, dictionnaires `.DBZ`/`.ZCL`, descripteurs `SUPER.PC` / `.68K` / `.pro`). Aucune donnée PSA n'est dans ce dépôt.
+Étapes 1 et 2 du plan faites (sans matériel). Aucune donnée PSA n'est dans ce dépôt : tout est lu dans la copie du pack au lancement.
+
+| Crate | Rôle |
+|---|---|
+| `psa-data` | lecture seule des données du pack : Firebird ODS 10, base véhicule `GPC`, dictionnaires `.DBZ`/`.ZCL`, descripteurs `SUPER.PC` / `.68K` / `.pro`, tables de mesures |
+| `vci` | transport vers l'interface : trait `Transport`, rejeu d'une capture (le backend Windows reste à écrire) |
+| `diag-core` | session de diagnostic, garde lecture seule, décodage des défauts et des mesures |
 
 ```sh
 cargo test                       # tests unitaires
-# tests sur le pack : définir FLEXIA_LEXIA, FLEXIA_COMMON, FLEXIA_FDB puis
+# tests sur les données réelles : définir FLEXIA_LEXIA, FLEXIA_COMMON, FLEXIA_FDB, FLEXIA_MESURES, FLEXIA_CAPTURE puis
 cargo test --release
 # test croisé avec les parseurs Python de référence (sorties identiques attendues)
 cargo run --release -p psa-data --example digest -- --lexia … --common … --fdb … > rust.txt
