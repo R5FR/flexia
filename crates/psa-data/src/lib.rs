@@ -3,10 +3,12 @@
 //!
 //! - [`ods10`] : bases Firebird / InterBase ODS 10, sans moteur Firebird ;
 //! - [`dico`] : dictionnaires de libellés `.DBZ` / `.ZCL` ;
+//! - [`gpc`] : base véhicule (calculateurs, commandes nommées, protocoles) ;
 //! - [`descr`] : descripteurs de la VCI (`SUPER*.PC`, `*.68K`, `P_*.pro`).
 
 pub mod descr;
 pub mod dico;
+pub mod gpc;
 pub mod ods10;
 pub mod text;
 

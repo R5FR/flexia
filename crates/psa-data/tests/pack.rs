@@ -136,3 +136,55 @@ fn firebird_gpc() {
     }
     assert!(n > 0);
 }
+
+#[test]
+fn gpc_injection_s2000pm1() {
+    use psa_data::gpc::Gpc;
+    let Some(fdb) = dossier("FLEXIA_FDB") else {
+        return;
+    };
+    let g = Gpc::open(fdb.join("GPC.FDB")).unwrap();
+    assert_eq!((g.ecu_types.len(), g.commands.len()), (726, 16565));
+
+    let t = g.ecu_type(356).unwrap();
+    assert_eq!(
+        (t.name.as_str(), t.marque.as_str(), t.prot_id),
+        ("S2000PM1", "SAGEM", Some(60))
+    );
+    let p = g.protocol_of(356).unwrap();
+    assert!(p
+        .files
+        .iter()
+        .any(|(n, b)| n == "P_INJFIG.68K" && !b.is_empty()));
+
+    // Code cal 8e, Codes Com vus dans la capture du 2026-11-13
+    let c = |n: &str| g.command(356, n).unwrap();
+    assert!(g.commands_of(356).all(|c| c.code_cal == 0x8e));
+    assert_eq!(g.commands_of(356).count(), 19);
+    for (n, com) in [
+        ("INIT", 1),
+        ("FIN_DIAG", 2),
+        ("TP", 3),
+        ("IDENTIFICATION", 4),
+        ("GENERIQUE_HN", 6),
+        ("LEC_TRM", 7),
+    ] {
+        assert_eq!(c(n).code_com, com, "{n}");
+    }
+    assert_eq!(
+        (
+            c("LECTURE_DEFAUTS").code_com,
+            c("LECTURE_DEFAUTS").data.as_slice()
+        ),
+        (0x0c, &[0xff, 0x00][..])
+    );
+    assert_eq!(c("EFFACE_DEFAUTS").code_com, 0x0e);
+
+    // véhicule -> famille INJ (cible 10) -> type 356
+    let fam = g.families.iter().find(|f| f.id == 47).unwrap();
+    assert_eq!((fam.name.as_str(), fam.target.as_str()), ("INJ", "10"));
+    assert!(g
+        .ecus_of_vehicule(fam.veh_id)
+        .iter()
+        .any(|(f, _, t)| f.id == 47 && t.id == 356));
+}
