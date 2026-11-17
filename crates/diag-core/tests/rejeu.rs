@@ -40,6 +40,16 @@ fn session_injection() {
     let canal = s.ouvrir(S2000PM1).unwrap();
     assert_eq!(canal.code_cal, 0x8e);
     let id = s.identification(&canal).unwrap();
+    // mêmes valeurs que l'écran « identification » de Lexia
+    let champs = diag_core::decode_identification(id.kwp()).unwrap();
+    assert_eq!(
+        (
+            champs.reference_psa.as_str(),
+            champs.reference_complementaire.as_str(),
+            champs.version_diagnostic.as_str()
+        ),
+        ("9644674580", "9655212680", "0D")
+    );
     assert_eq!((id.adresse(), &id.kwp()[..2]), (0x10, &[0x61, 0x80][..]));
     assert_eq!(s.transport().position(), debut + 5);
 

@@ -169,6 +169,36 @@ pub fn code_defaut(brut: u16) -> String {
     format!("{lettre}{:04X}", brut & 0x3FFF)
 }
 
+/// Champs de l'identification d'un calculateur (réponse `61 80 …`), tels que Lexia les affiche.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Identification {
+    /// « Référence PSA » : 10 chiffres.
+    pub reference_psa: String,
+    /// « Référence complémentaire » : 10 chiffres.
+    pub reference_complementaire: String,
+    /// « Version diagnostic » : 2 chiffres hexadécimaux.
+    pub version_diagnostic: String,
+}
+
+/// Décode l'identification `61 80 | réf. PSA (5 o) | 2 o | réf. complémentaire (5 o) | 4 o | version diag | …`.
+/// Constaté sur l'injection S2000PM1 contre l'écran de Lexia du 2026-11-13. Rend `None` si la réponse n'a pas
+/// cette forme (les deux références doivent être des suites de chiffres) : elle reste alors à lire en brut.
+/// Fournisseur, référence logiciel, indice d'évolution et date d'intervention ne sont pas décodés.
+pub fn decode_identification(kwp: &[u8]) -> Option<Identification> {
+    if kwp.len() < 19 || kwp[..2] != [0x61, 0x80] {
+        return None;
+    }
+    let chiffres = |octets: &[u8]| {
+        let s: String = octets.iter().map(|b| format!("{b:02X}")).collect();
+        s.bytes().all(|c| c.is_ascii_digit()).then_some(s)
+    };
+    Some(Identification {
+        reference_psa: chiffres(&kwp[2..7])?,
+        reference_complementaire: chiffres(&kwp[9..14])?,
+        version_diagnostic: format!("{:02X}", kwp[18]),
+    })
+}
+
 /// Décode une réponse `57 n (code u16, statut)×n` (ReadStatusOfDTC).
 pub fn decode_defauts(kwp: &[u8]) -> Result<Vec<Defaut>> {
     let (&[0x57, n], reste) = kwp
@@ -401,6 +431,23 @@ mod tests {
         assert_eq!(v.champs, ["APPLI_X", "REF1", "V1.2.3", "@FAB", "01.02"]);
         assert_eq!(v.version(), Some("V1.2.3"));
         assert_eq!(VersionVci::parse(b"").version(), None);
+    }
+
+    #[test]
+    fn identification() {
+        let mut kwp = vec![
+            0x61, 0x80, 0x96, 0x12, 0x34, 0x56, 0x80, 0x00, 0x05, 0x96, 0x65, 0x43, 0x21, 0x80,
+        ];
+        kwp.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0x0d, 0x01, 0xff]);
+        let id = decode_identification(&kwp).unwrap();
+        assert_eq!(id.reference_psa, "9612345680");
+        assert_eq!(id.reference_complementaire, "9665432180");
+        assert_eq!(id.version_diagnostic, "0D");
+        assert!(decode_identification(&kwp[..18]).is_none());
+        kwp[3] = 0xAB; // pas une suite de chiffres
+        assert!(decode_identification(&kwp).is_none());
+        kwp[1] = 0x81;
+        assert!(decode_identification(&kwp).is_none());
     }
 
     #[test]
