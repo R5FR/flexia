@@ -9,6 +9,9 @@
 //! aiguillage. La colonne `lecture` (relevée par `scripts/cal_types.py`) dit ce que la fonction fait d'une
 //! fiche de ce type, ex. `get(1) fild16 set_f` = un octet lu, mis à l'échelle, rendu en flottant. Seules
 //! les formes reconnues sont décodées ; les autres restent sans valeur.
+//!
+//! Colonne facultative `formule` (`scripts/mesures_emul.py`, obtenue en exécutant la fonction du module) pour les
+//! fiches sur plusieurs octets ou en champ de bits : `be|le u|s pos1,pos2… facteur décalage [masque bits]`.
 
 use crate::{Error, Result};
 use std::path::Path;
@@ -52,6 +55,70 @@ impl Lecture {
     }
 }
 
+/// Formule d'une fiche obtenue en exécutant la fonction de mesure du module : entier formé des octets `positions`
+/// (gros- ou petit-boutiste, signé ou non), puis `((x >> bits) & masque) × facteur + décalage`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Formule {
+    pub petit_boutiste: bool,
+    pub signe: bool,
+    /// Positions dans la réponse de la VCI, préfixe compris.
+    pub positions: Vec<usize>,
+    pub facteur: f64,
+    pub decalage: f64,
+    pub masque: Option<u64>,
+    pub bits: u32,
+}
+
+impl Formule {
+    /// Depuis la colonne `formule` ; `None` si elle est vide ou mal formée.
+    pub fn depuis(texte: &str) -> Option<Self> {
+        let t: Vec<&str> = texte.split_whitespace().collect();
+        if t.len() != 5 && t.len() != 7 {
+            return None;
+        }
+        let positions = t[2].split(',').map(|p| p.parse().ok()).collect::<Option<Vec<usize>>>()?;
+        if positions.is_empty() || positions.len() > 4 {
+            return None;
+        }
+        Some(Formule {
+            petit_boutiste: match t[0] {
+                "be" => false,
+                "le" => true,
+                _ => return None,
+            },
+            signe: match t[1] {
+                "u" => false,
+                "s" => true,
+                _ => return None,
+            },
+            positions,
+            facteur: t[3].parse().ok()?,
+            decalage: t[4].parse().ok()?,
+            masque: match t.get(5) {
+                Some(m) => Some(u64::from_str_radix(m, 16).ok()?),
+                None => None,
+            },
+            bits: match t.get(6) {
+                Some(b) => b.parse().ok()?,
+                None => 0,
+            },
+        })
+    }
+
+    pub fn valeur(&self, reponse: &[u8]) -> Option<f64> {
+        let octets = self.positions.iter().map(|&p| reponse.get(p).copied()).collect::<Option<Vec<u8>>>()?;
+        let n = octets.len() as u32;
+        let ordonnes: Vec<u8> = if self.petit_boutiste { octets.into_iter().rev().collect() } else { octets };
+        let x = ordonnes.iter().fold(0u64, |a, &b| (a << 8) | u64::from(b));
+        let x = match self.masque {
+            Some(m) => ((x >> self.bits) & m) as f64,
+            None if self.signe && x >= 1 << (8 * n - 1) => x as f64 - (1u64 << (8 * n)) as f64,
+            None => x as f64,
+        };
+        Some(x * self.facteur + self.decalage)
+    }
+}
+
 /// Une mesure dans une trame de réponse.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Fiche {
@@ -62,18 +129,23 @@ pub struct Fiche {
     pub facteur: f64,
     pub decalage: f64,
     pub lecture: Lecture,
+    /// Formule obtenue par émulation, pour une fiche que `lecture` ne sait pas décoder.
+    pub formule: Option<Formule>,
 }
 
 impl Fiche {
     /// Vrai si la valeur de cette fiche sait être calculée.
     pub fn decodable(&self) -> bool {
-        self.ty != TYPE_CHECKSUM && self.lecture != Lecture::Inconnue
+        self.ty != TYPE_CHECKSUM && (self.lecture != Lecture::Inconnue || self.formule.is_some())
     }
 
     /// Valeur physique, si la lecture est reconnue et l'octet présent.
     pub fn valeur(&self, reponse: &[u8]) -> Option<f64> {
         if !self.decodable() {
             return None;
+        }
+        if let (Lecture::Inconnue, Some(f)) = (self.lecture, &self.formule) {
+            return f.valeur(reponse);
         }
         let brut = f64::from(*reponse.get(self.pos)?);
         Some(match self.lecture {
@@ -145,6 +217,7 @@ impl Dictionnaire {
                 facteur: c[9].parse().map_err(|_| err("facteur"))?,
                 decalage: c[10].parse().map_err(|_| err("decalage"))?,
                 lecture,
+                formule: c.get(12).and_then(|f| Formule::depuis(f)),
             };
             match trames.last_mut() {
                 Some(t) if t.module == c[0] && t.fonction == c[4] => t.fiches.push(fiche),
@@ -234,6 +307,29 @@ mod tests {
             d.trames[0].decode(&rep),
             vec![("A", Some(6.0)), ("B", Some(10.0)), ("C", None), ("D", None)]
         );
+    }
+
+    #[test]
+    fn formules() {
+        // vitesse de roue de l'ABS 351 : mot gros-boutiste × 0,01 (émulation de CAL351)
+        let f = Formule::depuis("be u 7,8 0.01 0.0").unwrap();
+        assert_eq!(f.valeur(&[0, 0, 0, 0, 0, 0x61, 0xc0, 0x03, 0xe8]), Some(10.0));
+        let le = Formule::depuis("le u 7,8 0.0625 0.0").unwrap();
+        assert_eq!(le.valeur(&[0, 0, 0, 0, 0, 0x61, 0xc0, 0x10, 0x00]), Some(1.0));
+        let s = Formule::depuis("be s 5,6 1 0").unwrap();
+        assert_eq!(s.valeur(&[0, 0, 0, 0, 0, 0xff, 0xfe]), Some(-2.0));
+        let bits = Formule::depuis("be u 5 1.0 0.0 3 4").unwrap();
+        assert_eq!(bits.valeur(&[0, 0, 0, 0, 0, 0xb0]), Some(3.0));
+        assert_eq!(f.valeur(&[0; 8]), None, "octet absent");
+        for faux in ["", "xx u 7 1 0", "be u 7", "be u a 1 0", "be u 7 1 0 zz 1"] {
+            assert!(Formule::depuis(faux).is_none(), "{faux}");
+        }
+        // dans le dictionnaire : la formule s'applique à une fiche que `lecture` ne décode pas
+        let tsv = "module\tECUTYID\tECUNAME\tmarque\tfonction\trequete\tpos\ttype\tparametre\tfacteur\tdecalage\tlecture\tformule\n\
+                   CAL9.DLL\t9\tX\tY\tF\tc0\t7\t4\tV\t1\t0.0\tget(1) fild16 get(1) get(1) shl fild32 set_f\tbe u 7,8 0.01 0.0\n";
+        let d = Dictionnaire::parse(tsv).unwrap();
+        assert!(d.trames[0].fiches[0].decodable());
+        assert_eq!(d.trames[0].decode(&[1, 0x10, 4, 0, 5, 0x61, 0xc0, 0x03, 0xe8]), vec![("V", Some(10.0))]);
     }
 
     #[test]
