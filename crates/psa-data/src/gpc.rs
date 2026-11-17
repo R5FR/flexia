@@ -6,6 +6,7 @@
 
 use crate::ods10::{col, Database, Row, Value};
 use crate::{Error, Result};
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 /// Type de calculateur (`ECUTYPE`) ; `id` est le `n` de `CAL<n>.DLL`.
@@ -81,6 +82,8 @@ pub struct Gpc {
     pub ecu_types: Vec<EcuType>,
     pub commands: Vec<Command>,
     pub protocols: Vec<Protocol>,
+    /// (type de calculateur, code défaut en hexadécimal majuscule) → libellés bruts distincts de `FAULT.FAULIB`.
+    defauts: BTreeMap<(i64, String), Vec<String>>,
 }
 
 fn int(r: &Row, name: &str) -> Option<i64> {
@@ -141,7 +144,7 @@ impl Gpc {
             })
             .collect::<Result<_>>()?;
 
-        let ecus = db
+        let ecus: Vec<Ecu> = db
             .rows("ECU", false)?
             .iter()
             .map(|r| {
@@ -206,6 +209,29 @@ impl Gpc {
             })
             .collect::<Result<_>>()?;
 
+        // défauts connus : I_ECUFAU relie un calculateur (ECUID) à des lignes de FAULT (code, libellé)
+        let type_de: HashMap<i64, i64> = ecus.iter().map(|e| (e.id, e.ecu_type_id)).collect();
+        let mut fault: HashMap<i64, (String, String)> = HashMap::new();
+        for r in &db.rows("FAULT", false)? {
+            let (code, lib) = (text(r, "FAUCODEECU").to_ascii_uppercase(), text(r, "FAULIB"));
+            if !code.is_empty() && !lib.is_empty() {
+                fault.insert(req(r, "FAULT", "FAUID")?, (code, lib));
+            }
+        }
+        let mut defauts: BTreeMap<(i64, String), Vec<String>> = BTreeMap::new();
+        for r in &db.rows("I_ECUFAU", false)? {
+            let (Some(ecu), Some(fau)) = (int(r, "ECUID"), int(r, "FAUID")) else {
+                continue;
+            };
+            let (Some(&ty), Some((code, lib))) = (type_de.get(&ecu), fault.get(&fau)) else {
+                continue;
+            };
+            let libelles = defauts.entry((ty, code.clone())).or_default();
+            if !libelles.contains(lib) {
+                libelles.push(lib.clone());
+            }
+        }
+
         Ok(Self {
             vehicules,
             families,
@@ -213,7 +239,21 @@ impl Gpc {
             ecu_types,
             commands,
             protocols,
+            defauts,
         })
+    }
+
+    /// Libellés bruts d'un code défaut (hexadécimal, ex. `0420`) pour un type de calculateur ; à résoudre
+    /// avec [`crate::libelles`]. Plusieurs libellés si la base en donne selon le véhicule.
+    pub fn libelles_defaut(&self, ecu_type_id: i64, code: &str) -> &[String] {
+        self.defauts
+            .get(&(ecu_type_id, code.to_ascii_uppercase()))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    /// Nombre de couples (type de calculateur, code défaut) connus.
+    pub fn nb_defauts(&self) -> usize {
+        self.defauts.len()
     }
 
     pub fn ecu_type(&self, id: i64) -> Option<&EcuType> {

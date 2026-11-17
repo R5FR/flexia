@@ -196,3 +196,31 @@ fn mesures_injection_ralenti() {
     );
     assert_eq!(v.len(), 13);
 }
+
+/// Libellé du défaut P0420 de l'injection : celui que Lexia affichait le 2026-11-13.
+#[test]
+fn libelle_defaut_p0420() {
+    use psa_data::gpc::Gpc;
+    use psa_data::libelles::Dicos;
+    let (Some(fdb), Some(lx)) = (dossier("FLEXIA_FDB"), dossier("FLEXIA_LEXIA")) else {
+        return;
+    };
+    let g = Gpc::open(fdb.join("GPC.FDB")).unwrap();
+    assert_eq!(g.nb_defauts(), 27464); // couples (type, code) ayant un libellé
+    let bruts = g.libelles_defaut(356, "0420");
+    assert_eq!(bruts, ["@P3019-CITACT@\\+@P3020-CITACT"]);
+    let dicos = Dicos::new(lx.join("DICO"), "FR");
+    let l = dicos.libelle(&bruts[0]);
+    assert_eq!(l.parties, ["Vieillissement catalyseur", "Perte efficacité"]);
+    assert_eq!(l.to_string(), "Vieillissement catalyseur : Perte efficacité");
+    assert!(g.libelles_defaut(356, "FFFF").is_empty());
+    // tous les libellés du type 356 se résolvent sans phrase manquante
+    let mut n = 0;
+    for code in 0..=0xFFFFu32 {
+        for b in g.libelles_defaut(356, &format!("{code:04X}")) {
+            n += 1;
+            assert!(!dicos.libelle(b).to_string().contains("[P"), "{code:04X} {b}");
+        }
+    }
+    assert!(n >= 173, "{n}");
+}
