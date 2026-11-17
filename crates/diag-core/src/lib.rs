@@ -14,6 +14,10 @@ use vci::{etat, Request, Response, Transport, VciError, CAL_SYSTEME};
 
 /// Pause entre le retour au boot et le démarrage du firmware (`Sleep(100)` de GestComm).
 pub const PAUSE_APRES_RESET: std::time::Duration = std::time::Duration::from_millis(100);
+/// Pause après le démarrage du firmware, avant toute autre commande. Constaté le 2026-11-17 sur la C5 : sans
+/// elle, la VCI mesure 0,40 V sur la prise et refuse le descripteur `C_` (état `29`) ; DiagBox laisse au moins
+/// 400 ms entre `12` et le voltmètre, 1,4 s avant le premier `C_` (capture du 13/11).
+pub const PAUSE_APRES_DEMARRAGE: std::time::Duration = std::time::Duration::from_millis(1000);
 /// Statut de la VCI sans session calculateur ouverte ; `01 00` quand une session est ouverte.
 pub const STATUT_REPOS: [u8; 2] = [0, 0];
 /// Statut de la VCI pendant une session calculateur (constaté : la VCI entretient elle-même la session).
@@ -359,6 +363,7 @@ impl<'a, T: Transport> Session<'a, T> {
                 contexte: "démarrage du firmware de la VCI".into(),
             });
         }
+        std::thread::sleep(PAUSE_APRES_DEMARRAGE);
         Ok(VersionVci::parse(&rep.data))
     }
 
