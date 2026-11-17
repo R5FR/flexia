@@ -350,11 +350,12 @@ impl<'a, T: Transport> Session<'a, T> {
         Ok(VersionVci::parse(&rep.data))
     }
 
-    /// Voltmètre de la VCI (requête `04`, comme Lexia) : valeur brute sur 16 bits, échelle non établie.
-    pub fn voltmetre(&mut self) -> Result<u16> {
+    /// Voltmètre de la VCI (type de tension `04`, comme Lexia), en volts. La VCI rend la partie entière puis
+    /// les centièmes : tension = entier + centièmes × 0,01 (`GestComm!_MesureTensionMVCI`).
+    pub fn voltmetre(&mut self) -> Result<f64> {
         let rep = self.systeme(sys::VOLTMETRE, &[0x04])?;
         match (rep.etat, rep.data.as_slice()) {
-            (etat::REPONSE, &[h, l]) => Ok(u16::from_be_bytes([h, l])),
+            (etat::REPONSE, &[entier, centiemes]) => Ok(f64::from(entier) + f64::from(centiemes) * 0.01),
             (etat::REPONSE, d) => Err(Error::Reponse(format!("voltmètre : {} octets", d.len()))),
             (e, _) => Err(Error::Etat {
                 etat: e,

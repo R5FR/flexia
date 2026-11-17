@@ -182,7 +182,7 @@ fn connexion_vci() {
     assert_eq!(s.version().unwrap().version(), Some("V4.3.2"));
     s.transport_mut().aller_a(13);
     s.statut().unwrap();
-    assert_eq!(s.voltmetre().unwrap(), 0x0b56);
+    assert_eq!(s.voltmetre().unwrap(), 11.86, "0b 56 = 11 V + 86 centièmes");
 }
 
 /// BSI de la C5 (type 264, canal 7a) : ouverture comme Lexia (INIT par trame complète), lecture de la
