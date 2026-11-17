@@ -126,6 +126,10 @@ impl From<std::io::Error> for VciError {
 /// Un échange avec la VCI.
 pub trait Transport {
     fn exchange(&mut self, req: &Request) -> Result<Response, VciError>;
+
+    /// Temporisations des commandes d'un canal : (Code Com, TEMPO) de la table `.PC` du protocole.
+    /// Elles ne servent qu'à borner l'attente côté PC ; un transport sans attente les ignore.
+    fn definir_tempos(&mut self, _code_cal: u8, _tempos: &[(u8, u32)]) {}
 }
 
 /// Transport qui écrit chaque échange sur la sortie d'erreur, puis le délègue.
@@ -140,18 +144,18 @@ impl<T: Transport> Transport for Trace<T> {
             Ok(rep) => {
                 let octets: String = rep.data.iter().take(48).map(|b| format!(" {b:02x}")).collect();
                 eprintln!(
-                    "> {req}
-< état {:02x} [{} o]{octets}  ({ms} ms)",
+                    "> {req}\n< état {:02x} [{} o]{octets}  ({ms} ms)",
                     rep.etat,
                     rep.data.len()
                 );
             }
-            Err(e) => eprintln!(
-                "> {req}
-< ERREUR {e}  ({ms} ms)"
-            ),
+            Err(e) => eprintln!("> {req}\n< ERREUR {e}  ({ms} ms)"),
         }
         r
+    }
+
+    fn definir_tempos(&mut self, code_cal: u8, tempos: &[(u8, u32)]) {
+        self.0.definir_tempos(code_cal, tempos);
     }
 }
 
@@ -159,11 +163,19 @@ impl<T: Transport + ?Sized> Transport for &mut T {
     fn exchange(&mut self, req: &Request) -> Result<Response, VciError> {
         (**self).exchange(req)
     }
+
+    fn definir_tempos(&mut self, code_cal: u8, tempos: &[(u8, u32)]) {
+        (**self).definir_tempos(code_cal, tempos);
+    }
 }
 
 impl<T: Transport + ?Sized> Transport for Box<T> {
     fn exchange(&mut self, req: &Request) -> Result<Response, VciError> {
         (**self).exchange(req)
+    }
+
+    fn definir_tempos(&mut self, code_cal: u8, tempos: &[(u8, u32)]) {
+        (**self).definir_tempos(code_cal, tempos);
     }
 }
 

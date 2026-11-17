@@ -300,6 +300,16 @@ impl<'a, T: Transport> Session<'a, T> {
         let config = fichier("C_").ok_or_else(|| manque("descripteur C_*.68K"))?;
         let protocole = fichier("P_").ok_or_else(|| manque("descripteur P_*.68K"))?;
         let (desc, _) = descr::commandes_68k(&descr::parse_68k(&protocole));
+        // temporisations des commandes : table `.PC` du protocole (même format que SUPER.PC), lignes du canal
+        let tempos: Vec<(u8, u32)> = prot
+            .files
+            .iter()
+            .filter(|(n, _)| n.to_ascii_uppercase().ends_with(".PC"))
+            .flat_map(|(_, b)| descr::parse_pc(b))
+            .filter(|r| r.classe == code_cal)
+            .map(|r| (r.code, r.delai))
+            .collect();
+        self.vci.definir_tempos(code_cal, &tempos);
 
         self.statut()?;
         for (com, data, nom) in [(sys::CONFIG, &config, "C_"), (sys::PROTOCOLE, &protocole, "P_")] {

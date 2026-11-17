@@ -156,6 +156,14 @@ fn gpc_injection_s2000pm1() {
     );
     assert_eq!(c("EFFACE_DEFAUTS").code_com, 0x0e);
 
+    // table .PC du protocole : temporisations par commande (INIT 300, les autres 150)
+    let pc = p.files.iter().find(|(n, _)| n == "P_INJFIG.PC").unwrap();
+    let lignes = descr::parse_pc(&pc.1);
+    assert_eq!(lignes.len(), 19);
+    assert!(lignes
+        .iter()
+        .all(|l| l.classe == 0x8e && l.delai == if l.code == 1 { 300 } else { 150 }));
+
     // véhicule -> famille INJ (cible 10) -> type 356
     let fam = g.families.iter().find(|f| f.id == 47).unwrap();
     assert_eq!((fam.name.as_str(), fam.target.as_str()), ("INJ", "10"));

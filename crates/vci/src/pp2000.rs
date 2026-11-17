@@ -39,11 +39,12 @@ const ENTETE: usize = 20;
 
 /// Délai (ms) d'une commande système absente de la table, comme GestComm.
 pub const DELAI_SYSTEME_DEFAUT: u32 = 150;
-/// GestComm multiplie le délai de `SUPER.PC` par 55 (constaté : `07` → 550 000, `fe` → 220 000, `12` → 22 000).
+/// Délai en ms = TEMPO de la table `.PC` × 55. Constaté dans GestComm pour `SUPER.PC` (`07` → 550 000,
+/// `fe` → 220 000, `12` → 22 000) et dans COMMVEH pour les commandes calculateur (`imul eax, eax, 0x37`).
 pub const FACTEUR_DELAI: u32 = 55;
-/// Délai (ms) des commandes vers un calculateur. Valeur de Lexia inconnue : borne large, la VCI
-/// rend d'elle-même l'état « pas de réponse » après quelques secondes.
-pub const DELAI_ECU_DEFAUT: u32 = 30_000;
+/// Délai (ms) d'une commande calculateur absente de la table de son protocole : TEMPO 150, la valeur de
+/// presque toutes les commandes (`INIT` : 300).
+pub const DELAI_ECU_DEFAUT: u32 = 150 * FACTEUR_DELAI;
 
 fn erreur(quoi: &str) -> VciError {
     VciError::Transport(format!("{quoi} (erreur Windows {})", unsafe { GetLastError() }))
@@ -145,7 +146,8 @@ pub struct Pp2000 {
     chemin: Vec<u16>,
     /// (Code Com, délai de `SUPER.PC`) ; la première ligne d'un code l'emporte.
     delais_systeme: Vec<(u8, u32)>,
-    pub delai_ecu: u32,
+    /// (Code cal, Code Com, TEMPO) des tables `.PC` des protocoles ouverts.
+    tempos_ecu: Vec<(u8, u8, u32)>,
 }
 
 impl Pp2000 {
@@ -154,14 +156,18 @@ impl Pp2000 {
         Self {
             chemin: chemin.encode_utf16().chain(std::iter::once(0)).collect(),
             delais_systeme,
-            delai_ecu: DELAI_ECU_DEFAUT,
+            tempos_ecu: Vec::new(),
         }
     }
 
     /// Délai transmis au pilote pour cette requête, en millisecondes.
     pub fn delai(&self, req: &Request) -> u32 {
         if req.code_cal != CAL_SYSTEME {
-            return self.delai_ecu;
+            return self
+                .tempos_ecu
+                .iter()
+                .find(|(cal, com, _)| (*cal, *com) == (req.code_cal, req.code_com))
+                .map_or(DELAI_ECU_DEFAUT, |(_, _, t)| t.saturating_mul(FACTEUR_DELAI));
         }
         self.delais_systeme
             .iter()
@@ -240,6 +246,12 @@ impl Transport for Pp2000 {
         }
         Ok(Response { etat: comm as u8, data })
     }
+
+    fn definir_tempos(&mut self, code_cal: u8, tempos: &[(u8, u32)]) {
+        self.tempos_ecu.retain(|(cal, _, _)| *cal != code_cal);
+        self.tempos_ecu
+            .extend(tempos.iter().map(|&(com, t)| (code_cal, com, t)));
+    }
 }
 
 #[cfg(test)]
@@ -260,5 +272,26 @@ mod tests {
         assert_eq!(p.delai(&Request::new(0, 0xfe, [])), 220_000);
         assert_eq!(p.delai(&Request::new(0, 0x55, [])), DELAI_SYSTEME_DEFAUT);
         assert_eq!(p.delai(&Request::new(0x8e, 0x07, [])), DELAI_ECU_DEFAUT);
+    }
+
+    #[test]
+    fn delais_calculateur() {
+        let mut p = Pp2000::new("x", Vec::new());
+        p.definir_tempos(0x8e, &[(0x01, 300), (0x07, 150), (0x0c, 150), (0x0c, 999)]);
+        assert_eq!(p.delai(&Request::new(0x8e, 0x01, [])), 16_500);
+        assert_eq!(p.delai(&Request::new(0x8e, 0x07, [])), 8_250);
+        assert_eq!(
+            p.delai(&Request::new(0x8e, 0x0c, [])),
+            8_250,
+            "la première ligne l'emporte"
+        );
+        assert_eq!(p.delai(&Request::new(0x7a, 0x01, [])), DELAI_ECU_DEFAUT);
+        p.definir_tempos(0x8e, &[(0x01, 100)]);
+        assert_eq!(p.delai(&Request::new(0x8e, 0x01, [])), 5_500);
+        assert_eq!(
+            p.delai(&Request::new(0x8e, 0x07, [])),
+            DELAI_ECU_DEFAUT,
+            "table remplacée"
+        );
     }
 }
