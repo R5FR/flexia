@@ -1,17 +1,56 @@
 //! Tables de mesures des modules `CAL<n>.DLL`, lues dans le dictionnaire TSV produit sur la machine
 //! de l'utilisateur (`scripts/dico_mesures.py`, à partir de sa copie du pack).
 //!
-//! Colonnes : `module ECUTYID ECUNAME marque fonction requete pos type parametre facteur decalage`.
+//! Colonnes : `module ECUTYID ECUNAME marque fonction requete pos type parametre facteur decalage lecture`.
 //! `pos` compte le préfixe de 5 octets de la réponse de la VCI (`01 | adresse | longueur u16 | 05`).
 //! Valeur = brut × facteur + décalage.
+//!
+//! Le type d'une fiche n'a pas de sens universel : chaque fonction de chaque module contient son propre
+//! aiguillage. La colonne `lecture` (relevée par `scripts/cal_types.py`) dit ce que la fonction fait d'une
+//! fiche de ce type, ex. `get(1) fild16 set_f` = un octet lu, mis à l'échelle, rendu en flottant. Seules
+//! les formes reconnues sont décodées ; les autres restent sans valeur.
 
 use crate::{Error, Result};
 use std::path::Path;
 
-/// Type de fiche : octet non signé (constaté sur la capture du 2026-11-13).
+/// Type de fiche : octet non signé mis à l'échelle (constaté sur la capture du 2026-11-13).
+/// Seul type décodé quand le dictionnaire n'a pas de colonne `lecture`.
 pub const TYPE_OCTET: u16 = 9;
 /// Type de fiche : somme de contrôle, sans valeur.
 pub const TYPE_CHECKSUM: u16 = 255;
+
+/// Façon dont la fonction du module lit une fiche.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lecture {
+    /// Un octet non signé, puis × facteur + décalage.
+    Octet,
+    /// Un octet non signé affiché tel quel (facteur et décalage ignorés).
+    OctetBrut,
+    /// Forme non reconnue (plusieurs octets, chaîne…) : pas de valeur.
+    Inconnue,
+}
+
+impl Lecture {
+    /// Interprète la suite d'appels relevée dans le module ; `None` si la colonne est absente ou vide.
+    pub fn depuis(signature: &str) -> Option<Self> {
+        let appels: Vec<&str> = signature.split_whitespace().collect();
+        if appels.is_empty() {
+            return None;
+        }
+        let nb = |nom: &str| appels.iter().filter(|a| **a == nom).count();
+        // lectures de la réponse : `get(n)` (n octets) et `getuc` (un octet)
+        let lectures = appels.iter().filter(|a| a.starts_with("get")).count();
+        Some(
+            if lectures == 1 && nb("get(1)") == 1 && nb("shl") == 0 && nb("fild16") == 1 {
+                Lecture::Octet
+            } else if lectures == 1 && nb("getuc") == 1 && nb("fild16") == 0 {
+                Lecture::OctetBrut
+            } else {
+                Lecture::Inconnue
+            },
+        )
+    }
+}
 
 /// Une mesure dans une trame de réponse.
 #[derive(Debug, Clone, PartialEq)]
@@ -22,16 +61,25 @@ pub struct Fiche {
     pub ty: u16,
     pub facteur: f64,
     pub decalage: f64,
+    pub lecture: Lecture,
 }
 
 impl Fiche {
-    /// Valeur physique, si le type est connu et l'octet présent.
+    /// Vrai si la valeur de cette fiche sait être calculée.
+    pub fn decodable(&self) -> bool {
+        self.ty != TYPE_CHECKSUM && self.lecture != Lecture::Inconnue
+    }
+
+    /// Valeur physique, si la lecture est reconnue et l'octet présent.
     pub fn valeur(&self, reponse: &[u8]) -> Option<f64> {
-        (self.ty == TYPE_OCTET).then(|| {
-            reponse
-                .get(self.pos)
-                .map(|&b| f64::from(b) * self.facteur + self.decalage)
-        })?
+        if !self.decodable() {
+            return None;
+        }
+        let brut = f64::from(*reponse.get(self.pos)?);
+        Some(match self.lecture {
+            Lecture::Octet => brut * self.facteur + self.decalage,
+            _ => brut,
+        })
     }
 }
 
@@ -83,12 +131,20 @@ impl Dictionnaire {
                 return Err(err("11 colonnes attendues"));
             }
             let ecu_type_id = c[1].parse().map_err(|_| err("ECUTYID"))?;
+            let ty: u16 = c[7].parse().map_err(|_| err("type"))?;
+            // sans colonne `lecture` (ancien dictionnaire) : seul le type 9, vérifié sur capture, est décodé
+            let lecture = match c.get(11) {
+                Some(sig) => Lecture::depuis(sig).unwrap_or(Lecture::Inconnue),
+                None if ty == TYPE_OCTET => Lecture::Octet,
+                None => Lecture::Inconnue,
+            };
             let fiche = Fiche {
                 nom: c[8].to_string(),
                 pos: c[6].parse().map_err(|_| err("pos"))?,
-                ty: c[7].parse().map_err(|_| err("type"))?,
+                ty,
                 facteur: c[9].parse().map_err(|_| err("facteur"))?,
                 decalage: c[10].parse().map_err(|_| err("decalage"))?,
+                lecture,
             };
             match trames.last_mut() {
                 Some(t) if t.module == c[0] && t.fonction == c[4] => t.fiches.push(fiche),
@@ -136,6 +192,48 @@ mod tests {
         assert_eq!(t.decode(&rep), vec![("A", Some(960.0)), ("B", Some(31.0)), ("C", None)]);
         assert!(d.trame(9, &[]).is_none());
         assert!(d.trame(8, &[0xa1, 0x80, 0x01]).is_none());
+    }
+
+    #[test]
+    fn lectures() {
+        assert_eq!(
+            Lecture::depuis("set_uc set_s get(1) fild16 set_f"),
+            Some(Lecture::Octet)
+        );
+        assert_eq!(Lecture::depuis("get(1) fild16 rt set_uc"), Some(Lecture::Octet));
+        assert_eq!(Lecture::depuis("getuc set_s set_i"), Some(Lecture::OctetBrut));
+        assert_eq!(
+            Lecture::depuis("get(1) fild16 get(1) get(1) shl fild32 set_f"),
+            Some(Lecture::Inconnue)
+        );
+        assert_eq!(
+            Lecture::depuis("get(1) shl fild16 get(1) fild16"),
+            Some(Lecture::Inconnue)
+        );
+        assert_eq!(
+            Lecture::depuis("getuc set_s set_i getuc rt set_s set_i"),
+            Some(Lecture::Inconnue)
+        );
+        assert_eq!(Lecture::depuis("  "), None);
+
+        let tete =
+            "module\tECUTYID\tECUNAME\tmarque\tfonction\trequete\tpos\ttype\tparametre\tfacteur\tdecalage\tlecture\r\n";
+        let ligne =
+            |ty: u8, nom: &str, sig: &str| format!("CAL9.DLL\t9\tX\tY\tF\ta1\t6\t{ty}\t{nom}\t0.5\t1.0\t{sig}\r\n");
+        let tsv = [
+            tete.to_string(),
+            ligne(4, "A", "get(1) fild16 set_f"),
+            ligne(10, "B", "getuc set_s set_i"),
+            ligne(4, "C", "get(1) fild16 get(1) fild16 get(1) fild16 set_f"),
+            ligne(9, "D", ""),
+        ]
+        .concat();
+        let d = Dictionnaire::parse(&tsv).unwrap();
+        let rep = [1, 0x10, 2, 0, 5, 0x61, 10];
+        assert_eq!(
+            d.trames[0].decode(&rep),
+            vec![("A", Some(6.0)), ("B", Some(10.0)), ("C", None), ("D", None)]
+        );
     }
 
     #[test]
