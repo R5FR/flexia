@@ -113,15 +113,19 @@ pub fn service(desc: Option<&Cmd68k>, data: &[u8]) -> Result<u8, Refus> {
     let inconnu = || Refus::ServiceInconnu(format!("enregistrement D « {d} »"));
     let reste = d.strip_prefix('E').ok_or_else(inconnu)?;
     if reste.starts_with("--") {
-        // Seule la forme « E--1  1+ » est vérifiée sur capture (le service est le 1er octet des données).
-        // Les autres positions (ex. « E--1  2+ » de GENERIQUE) restent refusées tant qu'elles ne le sont pas.
-        if d != "E--1  1+" {
-            return Err(inconnu());
-        }
+        // « E--1  1+ » : la requête KWP est faite des données, le service en tête (vérifié sur capture).
+        // « E--1  2+ » : le 1er octet est l'adresse du calculateur visé, la requête suit (constaté dans CAL359, qui
+        // lit ses mesures par GENERIQUE avec `d0 21 c0` : BSI, lecture de la zone c0) ; le service est le 2e octet.
+        // Toute autre forme reste refusée.
+        let rang = match d.as_str() {
+            "E--1  1+" => 0,
+            "E--1  2+" => 1,
+            _ => return Err(inconnu()),
+        };
         return data
-            .first()
+            .get(rang)
             .copied()
-            .ok_or_else(|| Refus::ServiceInconnu("données de requête vides".into()));
+            .ok_or_else(|| Refus::ServiceInconnu("données de requête trop courtes".into()));
     }
     if reste.len() == 2 {
         return u8::from_str_radix(reste, 16).map_err(|_| inconnu());
@@ -183,9 +187,14 @@ mod tests {
         assert!(commande("INIT", Some(&d(&["E81"])), &[]).is_ok());
         assert!(commande("LEC_TRM", Some(&d(&["E21", "E--1  1+"])), &[0xc2, 0x80, 1]).is_ok());
         assert!(commande("GENERIQUE_HN", Some(&d(&["E--1  1+"])), &[0x17, 0xff, 0]).is_ok());
-        // GENERIQUE (cible puis service dans les données) : forme non vérifiée, refusée
+        // GENERIQUE : adresse visée puis requête (CAL359 : `d0 21 c0`) ; le service lu est le 2e octet
+        assert!(commande("GENERIQUE", Some(&d(&["E--1  2+"])), &[0xd0, 0x21, 0xc0]).is_ok());
         assert!(matches!(
-            commande("GENERIQUE", Some(&d(&["E--1  2+"])), &[0x10, 0x21, 0xfe]),
+            commande("GENERIQUE", Some(&d(&["E--1  2+"])), &[0xd0]),
+            Err(Refus::ServiceInconnu(_))
+        ));
+        assert!(matches!(
+            commande("GENERIQUE", Some(&d(&["E--1  3+"])), &[0xd0, 0x21, 0xc0]),
             Err(Refus::ServiceInconnu(_))
         ));
         for s in [
