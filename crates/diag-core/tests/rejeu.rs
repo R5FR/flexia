@@ -231,3 +231,31 @@ fn bsi_ouverture_et_zone_vin() {
     }
     assert_eq!(s.transport().position(), avant);
 }
+
+/// Écran « identification » de Lexia du 2026-11-13 à 18:31 : mêmes trois lectures, mêmes sept valeurs.
+#[test]
+fn identification_comme_lexia() {
+    let Some((gpc, _, mut rejeu)) = donnees() else {
+        return;
+    };
+    rejeu.aller_a_heure("18:30:40").unwrap();
+    let mut s = Session::new(rejeu, &gpc);
+    let canal = s.ouvrir(S2000PM1).unwrap();
+    s.transport_mut().aller_a_heure("18:31:25.82").unwrap();
+    let id = s.identification_complete(&canal).unwrap();
+    let champs: Vec<(&str, &str)> = id.champs.iter().map(|(n, v)| (*n, v.as_str())).collect();
+    assert_eq!(
+        champs,
+        [
+            ("FOURNISSEUR", "5"),
+            ("REF_PSA", "9644674580"),
+            ("REFERENCE_SOFT", "9655212680"),
+            ("REF_LOG", "9616161680"),
+            ("EDITIONSOFT", "1400"),
+            ("DATEDERINTERV", "20/09/2026"),
+            ("VERSION_DIAG", "0D"),
+        ]
+    );
+    // la BSI n'est pas une injection S2000 : pas de lecture supplémentaire
+    assert!(diag_core::decode_zone_fe(id.reponse.kwp()).is_none());
+}

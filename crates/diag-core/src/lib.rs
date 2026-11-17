@@ -174,16 +174,17 @@ pub fn code_defaut(brut: u16) -> String {
 pub struct Identification {
     /// « Référence PSA » : 10 chiffres.
     pub reference_psa: String,
+    /// Code du fournisseur (ex. 5 = SAGEM/JCAE dans la base).
+    pub fournisseur: u8,
     /// « Référence complémentaire » : 10 chiffres.
     pub reference_complementaire: String,
     /// « Version diagnostic » : 2 chiffres hexadécimaux.
     pub version_diagnostic: String,
 }
 
-/// Décode l'identification `61 80 | réf. PSA (5 o) | 2 o | réf. complémentaire (5 o) | 4 o | version diag | …`.
+/// Décode l'identification `61 80 | réf. PSA (5 o) | 00 | fournisseur | réf. complémentaire (5 o) | 4 o | version diag`.
 /// Constaté sur l'injection S2000PM1 contre l'écran de Lexia du 2026-11-13. Rend `None` si la réponse n'a pas
 /// cette forme (les deux références doivent être des suites de chiffres) : elle reste alors à lire en brut.
-/// Fournisseur, référence logiciel, indice d'évolution et date d'intervention ne sont pas décodés.
 pub fn decode_identification(kwp: &[u8]) -> Option<Identification> {
     if kwp.len() < 19 || kwp[..2] != [0x61, 0x80] {
         return None;
@@ -194,9 +195,68 @@ pub fn decode_identification(kwp: &[u8]) -> Option<Identification> {
     };
     Some(Identification {
         reference_psa: chiffres(&kwp[2..7])?,
+        fournisseur: kwp[8],
         reference_complementaire: chiffres(&kwp[9..14])?,
         version_diagnostic: format!("{:02X}", kwp[18]),
     })
+}
+
+/// Deux chiffres pour un octet BCD, comme Lexia : dizaines × 10 + unités, tronqué à deux caractères.
+/// Un octet non BCD déborde (`ff` → « 16 », `e6` → « 14 ») : c'est ce que montre l'écran de Lexia
+/// pour une zone que le calculateur n'a pas renseignée.
+fn bcd2(octet: u8) -> String {
+    let v = u32::from(octet >> 4) * 10 + u32::from(octet & 0x0F);
+    format!("{v:02}").chars().take(2).collect()
+}
+
+/// Date `jj mm aa` en octets décimaux.
+fn date(octets: &[u8]) -> String {
+    format!("{:02}/{:02}/20{:02}", octets[0], octets[1], octets[2])
+}
+
+/// « Date de dernière intervention » : octets 6 à 8 de la zone `61 cf` de l'injection S2000 (constaté).
+pub fn decode_date_intervention(kwp: &[u8]) -> Option<String> {
+    (kwp.len() >= 9 && kwp[..2] == [0x61, 0xcf]).then(|| date(&kwp[6..9]))
+}
+
+/// Zone `61 fe` de l'injection S2000 (table `TRAMEFE` du module) : (indice d'évolution, référence logiciel).
+/// Positions constatées : indice aux octets 13 et 14, référence aux octets 23 à 25, en BCD.
+pub fn decode_zone_fe(kwp: &[u8]) -> Option<(String, String)> {
+    if kwp.len() < 26 || kwp[..2] != [0x61, 0xfe] {
+        return None;
+    }
+    let indice = format!("{}{}", bcd2(kwp[13]), bcd2(kwp[14]));
+    let reference = format!("96{}{}{}80", bcd2(kwp[23]), bcd2(kwp[24]), bcd2(kwp[25]));
+    Some((indice, reference))
+}
+
+/// Identification complète : la réponse brute et les champs décodés, nommés comme dans la base
+/// (`FOURNISSEUR`, `REF_PSA`, `REFERENCE_SOFT`, `REF_LOG`, `EDITIONSOFT`, `DATEDERINTERV`, `VERSION_DIAG`),
+/// dans l'ordre de l'écran de Lexia.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentificationComplete {
+    pub reponse: ReponseEcu,
+    pub champs: Vec<(&'static str, String)>,
+}
+
+/// Libellés d'un écran d'identification : chaque champ avec son libellé de la base (sinon son nom), et le
+/// fournisseur avec son nom plutôt que son code quand la base le connaît.
+pub fn habiller_identification(
+    champs: &[(&'static str, String)],
+    habillages: &std::collections::HashMap<String, psa_data::libelles::Habillage>,
+) -> Vec<(String, String)> {
+    champs
+        .iter()
+        .map(|(nom, valeur)| {
+            let h = habillages.get(*nom);
+            let libelle = h
+                .map(|h| h.libelle.clone())
+                .filter(|l| !l.is_empty())
+                .unwrap_or_else(|| nom.to_string());
+            let etat = h.and_then(|h| valeur.parse::<f64>().ok().and_then(|v| h.etat(v)));
+            (libelle, etat.map_or_else(|| valeur.clone(), str::to_string))
+        })
+        .collect()
 }
 
 /// Décode une réponse `57 n (code u16, statut)×n` (ReadStatusOfDTC).
@@ -400,6 +460,35 @@ impl<'a, T: Transport> Session<'a, T> {
         self.commande(canal, "IDENTIFICATION", &[])
     }
 
+    /// Identification telle que Lexia l'affiche. Pour les injections S2000PM1, lit aussi comme lui les
+    /// zones `cf 00` (date de dernière intervention) et `fe` (référence logiciel, indice d'évolution) ;
+    /// une zone qui ne répond pas est simplement absente du résultat.
+    pub fn identification_complete(&mut self, canal: &Canal) -> Result<IdentificationComplete> {
+        let reponse = self.identification(canal)?;
+        let mut champs = Vec::new();
+        if let Some(id) = decode_identification(reponse.kwp()) {
+            let s2000 = self
+                .gpc
+                .ecu_type(canal.ecu_type_id)
+                .is_some_and(|t| t.name == "S2000PM1");
+            let zone = |s: &mut Self, lid: &[u8]| s2000.then(|| s.commande(canal, "LEC_TRM", lid).ok()).flatten();
+            let date = zone(self, &[0xcf, 0x00]).and_then(|r| decode_date_intervention(r.kwp()));
+            let fe = zone(self, &[0xfe]).and_then(|r| decode_zone_fe(r.kwp()));
+            champs.push(("FOURNISSEUR", id.fournisseur.to_string()));
+            champs.push(("REF_PSA", id.reference_psa));
+            champs.push(("REFERENCE_SOFT", id.reference_complementaire));
+            if let Some((indice, reference)) = fe {
+                champs.push(("REF_LOG", reference));
+                champs.push(("EDITIONSOFT", indice));
+            }
+            if let Some(d) = date {
+                champs.push(("DATEDERINTERV", d));
+            }
+            champs.push(("VERSION_DIAG", id.version_diagnostic));
+        }
+        Ok(IdentificationComplete { reponse, champs })
+    }
+
     /// Défauts mémorisés : `17 FF 00` par la commande générique, comme Lexia sur l'injection S2000PM1.
     pub fn lire_defauts(&mut self, canal: &Canal) -> Result<Vec<Defaut>> {
         decode_defauts(self.commande(canal, "GENERIQUE_HN", &[0x17, 0xFF, 0x00])?.kwp())
@@ -441,6 +530,7 @@ mod tests {
         kwp.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0x0d, 0x01, 0xff]);
         let id = decode_identification(&kwp).unwrap();
         assert_eq!(id.reference_psa, "9612345680");
+        assert_eq!(id.fournisseur, 5);
         assert_eq!(id.reference_complementaire, "9665432180");
         assert_eq!(id.version_diagnostic, "0D");
         assert!(decode_identification(&kwp[..18]).is_none());
@@ -448,6 +538,27 @@ mod tests {
         assert!(decode_identification(&kwp).is_none());
         kwp[1] = 0x81;
         assert!(decode_identification(&kwp).is_none());
+    }
+
+    #[test]
+    fn zones_s2000() {
+        assert_eq!(
+            (bcd2(0x16), bcd2(0x00), bcd2(0xff), bcd2(0xe6)),
+            ("16".into(), "00".into(), "16".into(), "14".into())
+        );
+        let mut fe = vec![0x61, 0xfe];
+        fe.extend_from_slice(&[0; 24]);
+        fe[13] = 0x12;
+        fe[14] = 0x34;
+        fe[23..26].copy_from_slice(&[0x11, 0x22, 0x33]);
+        assert_eq!(
+            decode_zone_fe(&fe),
+            Some(("1234".to_string(), "9611223380".to_string()))
+        );
+        assert!(decode_zone_fe(&fe[..25]).is_none());
+        let cf = [0x61, 0xcf, 0, 0, 0, 0, 0x14, 0x09, 0x1a];
+        assert_eq!(decode_date_intervention(&cf).as_deref(), Some("20/09/2026"));
+        assert!(decode_date_intervention(&cf[..8]).is_none());
     }
 
     #[test]
