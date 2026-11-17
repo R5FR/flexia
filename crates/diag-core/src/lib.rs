@@ -623,7 +623,13 @@ impl<'a, T: Transport> Session<'a, T> {
     /// Données d'une zone de la BSI (`LEC_TRM` + zone ; réponse `61 zone …`), sans `61 zone` ; `None` si la BSI
     /// refuse la zone (`7f 21 …`, ex. zone 83 sur la C5).
     pub fn zone_bsi(&mut self, canal: &Canal, lid: u8) -> Result<Option<Vec<u8>>> {
-        match self.commande(canal, "LEC_TRM", &[lid]) {
+        self.zone_bsi_par(canal, "LEC_TRM", lid)
+    }
+
+    /// Zone de la BSI lue par une commande nommée du canal (la BSI répond même quand le descripteur chargé est
+    /// celui d'un calculateur joint : commande `LEC_TRM_BSI` des portes, constaté le 2026-11-13).
+    pub fn zone_bsi_par(&mut self, canal: &Canal, commande: &str, lid: u8) -> Result<Option<Vec<u8>>> {
+        match self.commande(canal, commande, &[lid]) {
             Ok(r) => match r.kwp() {
                 [0x61, z, d @ ..] if *z == lid => Ok(Some(d.to_vec())),
                 k => Err(Error::Reponse(format!("zone {lid:02x} : {:02x?}", &k[..k.len().min(4)]))),
@@ -631,6 +637,36 @@ impl<'a, T: Transport> Session<'a, T> {
             Err(Error::Negative { service: 0x21, .. }) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// Lit les zones de défauts d'un type (`DefautsBsi::zones`) par `commande` et les décode.
+    fn defauts_zones(
+        &mut self,
+        canal: &Canal,
+        commande: &str,
+        composition: &Composition,
+        ini: &Ini,
+        defauts: &DefautsBsi,
+    ) -> Result<(Vec<Defaut>, ZonesLues)> {
+        let mut trames = BTreeMap::new();
+        for lid in defauts.zones(canal.ecu_type_id) {
+            if let Some(d) = self.zone_bsi_par(canal, commande, lid)? {
+                trames.insert(lid, d);
+            }
+        }
+        let liste = defauts
+            .decoder(canal.ecu_type_id, &trames, composition, ini)
+            .map_err(|e| Error::Donnee(format!("défauts lus dans la BSI : {e}")))?;
+        let d = liste
+            .into_iter()
+            .map(|d| Defaut {
+                code: d.code,
+                brut: 0,
+                statut: u8::from(d.etat == 'F'),
+                methode: true,
+            })
+            .collect();
+        Ok((d, trames))
     }
 
     /// Défauts de la BSI, lus comme CAL264 `LECTDEF3020` : zones 83, 84, 88, 87 (une zone refusée est absente),
@@ -642,25 +678,36 @@ impl<'a, T: Transport> Session<'a, T> {
         ini: &Ini,
         defauts: &DefautsBsi,
     ) -> Result<(Vec<Defaut>, ZonesLues)> {
-        let mut trames = BTreeMap::new();
-        for lid in psa_data::bsi::ZONES_DEFAUTS {
-            if let Some(d) = self.zone_bsi(canal, lid)? {
-                trames.insert(lid, d);
-            }
-        }
-        let liste = defauts
-            .decoder(&trames, composition, ini)
-            .map_err(|e| Error::Donnee(format!("défauts de la BSI : {e}")))?;
-        let d = liste
-            .into_iter()
-            .map(|d| Defaut {
-                code: d.code,
-                brut: 0,
-                statut: u8::from(d.etat == 'F'),
-                methode: true,
-            })
-            .collect();
-        Ok((d, trames))
+        self.defauts_zones(canal, "LEC_TRM", composition, ini, defauts)
+    }
+
+    /// Commande de lecture des zones de la BSI dans le descripteur d'un calculateur joint (`LEC_TRM_BSI`,
+    /// `LEC_TRMBSI`…).
+    pub fn commande_zone_bsi(&self, ecu_type_id: i64) -> Option<String> {
+        self.gpc
+            .commands_of(ecu_type_id)
+            .find(|c| c.name.starts_with("LEC_TRM") && c.name.contains("BSI"))
+            .map(|c| c.name.clone())
+    }
+
+    /// Défauts d'un calculateur joint dont la BSI garde les défauts (capteur de pluie, commutation sous volant,
+    /// portes), comme leur `LECTDEF` (capture du 2026-11-13) : fin du dialogue avec le calculateur, zones 85 et
+    /// 86 de la BSI lues par sa commande `LEC_TRM_BSI`, puis nouvelle identification. Le canal reste à fermer par
+    /// [`Session::quitter`].
+    pub fn lire_defauts_par_bsi(
+        &mut self,
+        canal: &Canal,
+        composition: &Composition,
+        ini: &Ini,
+        defauts: &DefautsBsi,
+    ) -> Result<(Vec<Defaut>, ZonesLues)> {
+        let commande = self
+            .commande_zone_bsi(canal.ecu_type_id)
+            .ok_or_else(|| Error::Donnee(format!("commande LEC_TRM_BSI du type {}", canal.ecu_type_id)))?;
+        self.commande(canal, "FIN_DIAG", &[])?;
+        let r = self.defauts_zones(canal, &commande, composition, ini, defauts);
+        self.identification(canal)?;
+        r
     }
 
     /// Lit une trame de mesures (`LEC_TRM` + requête de la trame) et décode ses fiches.

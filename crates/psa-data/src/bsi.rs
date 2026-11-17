@@ -23,9 +23,9 @@ use std::path::Path;
 pub const TYPE_BSI_X4: i64 = 264;
 /// Familles de zones dont Lexia télécharge la composition (`LISTEINI.INI`, section `[BSI]`).
 pub const FAMILLES: [u8; 5] = [0xC0, 0xB0, 0xD0, 0xA0, 0x83];
-/// Zones de défauts lues par CAL264 (`LECTDEF3020`), dans son ordre : paires (présents, mémorisés).
-pub const ZONES_DEFAUTS: [u8; 4] = [0x83, 0x84, 0x88, 0x87];
-const PAIRES_DEFAUTS: [(u8, u8); 2] = [(0x83, 0x84), (0x88, 0x87)];
+/// Paires de zones de défauts (présents, mémorisés) : BSI (CAL264 `LECTDEF3020` : 83, 84, 88, 87), puis
+/// calculateurs dont la BSI garde les défauts (capteur de pluie, commutation sous volant, portes : 85, 86).
+const PAIRES_DEFAUTS: [(u8, u8); 3] = [(0x83, 0x84), (0x88, 0x87), (0x85, 0x86)];
 
 /// Type d'un paramètre de zone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -515,11 +515,13 @@ pub struct DefautBsi {
     pub rang: u16,
 }
 
-/// Codes de défaut de la BSI (`bsi_defauts_CAL264.tsv`) et tables de libellés par véhicule.
+/// Codes de défaut lus dans les zones de la BSI (`bsi_defauts_CAL.tsv`), par type de calculateur : la BSI
+/// elle-même (zones 83, 84, 88, 87) et les calculateurs dont elle garde les défauts (zones 85, 86 : capteur de
+/// pluie, commutation sous volant, portes) ; tables de libellés par type et véhicule.
 #[derive(Debug, Clone, Default)]
 pub struct DefautsBsi {
-    codes: BTreeMap<(u8, u16, char), String>,
-    libelles: BTreeMap<String, String>,
+    codes: BTreeMap<(i64, u8, u16, char), String>,
+    libelles: BTreeMap<(i64, String), String>,
 }
 
 impl DefautsBsi {
@@ -529,7 +531,7 @@ impl DefautsBsi {
 
     pub fn lire(texte: &str) -> Result<Self> {
         let mut lignes = texte.lines();
-        let attendu = ["nature", "vehicule", "lid", "rang", "etat", "code"];
+        let attendu = ["nature", "ecutyid", "vehicule", "lid", "rang", "etat", "code"];
         let entete: Vec<&str> = lignes.next().unwrap_or("").split('\t').collect();
         if entete != attendu {
             return Err(Error::Format(format!("défauts BSI : en-tête {entete:?}")));
@@ -541,20 +543,39 @@ impl DefautsBsi {
             if c.len() != attendu.len() {
                 return Err(err("nombre de colonnes"));
             }
+            let id: i64 = c[1].parse().map_err(|_| err("ecutyid"))?;
             match c[0] {
                 "defaut" => {
-                    let lid = u8::from_str_radix(c[2], 16).map_err(|_| err("lid"))?;
-                    let rang = u16::from_str_radix(c[3], 16).map_err(|_| err("rang"))?;
-                    let etat = c[4].chars().next().ok_or_else(|| err("etat"))?;
-                    d.codes.insert((lid, rang, etat), c[5].to_string());
+                    let lid = u8::from_str_radix(c[3], 16).map_err(|_| err("lid"))?;
+                    let rang = u16::from_str_radix(c[4], 16).map_err(|_| err("rang"))?;
+                    let etat = c[5].chars().next().ok_or_else(|| err("etat"))?;
+                    d.codes.insert((id, lid, rang, etat), c[6].to_string());
                 }
                 "libelles" => {
-                    d.libelles.insert(c[1].to_string(), c[5].to_string());
+                    d.libelles.insert((id, c[2].to_string()), c[6].to_string());
                 }
                 _ => return Err(err("nature")),
             }
         }
         Ok(d)
+    }
+
+    /// Vrai si ce type de calculateur a ses défauts dans les zones de la BSI.
+    pub fn connait(&self, ecu_type_id: i64) -> bool {
+        self.codes.keys().any(|k| k.0 == ecu_type_id)
+    }
+
+    /// Paires (présents, mémorisés) de ce type : celles dont une zone a des codes.
+    fn paires(&self, ecu_type_id: i64) -> Vec<(u8, u8)> {
+        PAIRES_DEFAUTS
+            .into_iter()
+            .filter(|(p, m)| self.codes.keys().any(|k| k.0 == ecu_type_id && (k.1 == *p || k.1 == *m)))
+            .collect()
+    }
+
+    /// Zones que le module lit pour ce type, dans son ordre : 83, 84, 88, 87 pour la BSI ; 85, 86 sinon.
+    pub fn zones(&self, ecu_type_id: i64) -> Vec<u8> {
+        self.paires(ecu_type_id).into_iter().flat_map(|(p, m)| [p, m]).collect()
     }
 
     pub fn len(&self) -> usize {
@@ -565,9 +586,9 @@ impl DefautsBsi {
         self.codes.is_empty()
     }
 
-    /// Table `SGML/Menu/<nom>.DBF` des libellés de la BSI pour ce véhicule.
-    pub fn table_libelles(&self, vehicule: &str) -> Option<&str> {
-        self.libelles.get(vehicule).map(String::as_str)
+    /// Table `SGML/Menu/<nom>.DBF` des libellés de ce type de calculateur pour ce véhicule.
+    pub fn table_libelles(&self, ecu_type_id: i64, vehicule: &str) -> Option<&str> {
+        self.libelles.get(&(ecu_type_id, vehicule.to_string())).map(String::as_str)
     }
 
     /// Défauts des zones lues (`trames` : zone -> données après `61 LID` ; une zone refusée par la BSI est
@@ -575,9 +596,15 @@ impl DefautsBsi {
     /// un bit de la première donne un défaut `P`, un bit de la seconde seule un défaut `F`, rangs pris dans la
     /// composition de la première ; si une seule existe (BSI de la C5 : zone 84 sans 83), ses bits donnent des
     /// défauts `P`. Triés par code, sans doublon.
-    pub fn decoder(&self, trames: &BTreeMap<u8, Vec<u8>>, composition: &Composition, ini: &Ini) -> Result<Vec<DefautBsi>> {
+    pub fn decoder(
+        &self,
+        ecu_type_id: i64,
+        trames: &BTreeMap<u8, Vec<u8>>,
+        composition: &Composition,
+        ini: &Ini,
+    ) -> Result<Vec<DefautBsi>> {
         let mut out: Vec<DefautBsi> = Vec::new();
-        for (pres, mem) in PAIRES_DEFAUTS {
+        for (pres, mem) in self.paires(ecu_type_id) {
             let dispo = |z: u8| composition.contient(z) && trames.contains_key(&z);
             let (lid, t1, t2): (u8, &[u8], &[u8]) = match (dispo(pres), dispo(mem)) {
                 (true, true) => (pres, &trames[&pres], &trames[&mem]),
@@ -598,7 +625,7 @@ impl DefautsBsi {
                     };
                     let rel = k * 8 + b;
                     let rang = champs.get(rel).map_or(0xFFFF, |c| c.rang);
-                    let code = self.codes.get(&(lid, rang, etat)).cloned().unwrap_or_else(|| "ZZZ".into());
+                    let code = self.codes.get(&(ecu_type_id, lid, rang, etat)).cloned().unwrap_or_else(|| "ZZZ".into());
                     let d = DefautBsi { code, etat, lid, rang };
                     if !out.iter().any(|x| x.code == d.code && x.etat == d.etat) {
                         out.push(d);
@@ -726,26 +753,36 @@ mod tests {
         assert_eq!((v[0].0.nom.as_str(), &v[0].1), ("TEMPEAU", &Valeur::Nombre(83.0)));
         assert!(DictionnaireBsi::lire("x\n").is_err());
 
-        let t = "nature\tvehicule\tlid\trang\tetat\tcode\n\
-                 defaut\t*\t84\t01\tP\t6PZ\ndefaut\t*\t87\t00\tP\t63Z\nlibelles\tCITROENC5\t\t\t\tMENU906N\n";
+        let t = "nature\tecutyid\tvehicule\tlid\trang\tetat\tcode\n\
+                 defaut\t264\t*\t84\t01\tP\t6PZ\ndefaut\t264\t*\t87\t00\tP\t63Z\n\
+                 defaut\t225\t*\t86\t00\tP\t01A\nlibelles\t264\tCITROENC5\t\t\t\tMENU906N\n";
         let def = DefautsBsi::lire(t).unwrap();
-        assert_eq!(def.table_libelles("CITROENC5"), Some("MENU906N"));
+        assert_eq!(def.table_libelles(264, "CITROENC5"), Some("MENU906N"));
+        assert_eq!((def.zones(264), def.zones(225), def.zones(1)), (vec![0x83, 0x84, 0x88, 0x87], vec![0x85, 0x86], vec![]));
+        assert!(def.connait(225) && !def.connait(246));
         // BSI sans zone 83 : la zone 84 seule donne des défauts « P »
-        let r = [bloc(0x83, true, 1, &[0x01, 0x02, 0x01, 0xff, 0x04, 0x00, 0x01])];
+        let r = [bloc(0x83, true, 1, &[0x01, 0x02, 0x01, 0xff, 0x04, 0x00, 0x01, 0xff, 0x03, 0x00])];
         let c = Composition::depuis_mapping(r.iter().map(Vec::as_slice));
+        let ini = Ini::lire("[84]\n0=b\n1=b\n2=b\n[86]\n0=b\n[87]\n0=b\n1=b\n");
         let mut trames = BTreeMap::new();
         trames.insert(0x84, vec![0x02]);
         trames.insert(0x87, vec![0x00]);
-        let d = def.decoder(&trames, &c, &ini).unwrap();
+        let d = def.decoder(264, &trames, &c, &ini).unwrap();
         assert_eq!(d.iter().map(|d| (d.code.as_str(), d.etat, d.rang)).collect::<Vec<_>>(), [("6PZ", 'P', 1)]);
         trames.insert(0x84, vec![0x00]);
-        assert!(def.decoder(&trames, &c, &ini).unwrap().is_empty());
+        assert!(def.decoder(264, &trames, &c, &ini).unwrap().is_empty());
         trames.insert(0x87, vec![0x01]);
-        let d = def.decoder(&trames, &c, &ini).unwrap();
+        let d = def.decoder(264, &trames, &c, &ini).unwrap();
         assert_eq!(d[0].code, "63Z");
         // rang sans code : ZZZ
         trames.insert(0x84, vec![0x01]);
-        assert!(def.decoder(&trames, &c, &ini).unwrap().iter().any(|d| d.code == "ZZZ"));
+        assert!(def.decoder(264, &trames, &c, &ini).unwrap().iter().any(|d| d.code == "ZZZ"));
+        // porte : zone 86 (la 85 n'existe pas), bit 0 -> 01A ; les zones de la BSI n'y comptent pas
+        let mut t2 = BTreeMap::new();
+        t2.insert(0x86, vec![0x01]);
+        t2.insert(0x84, vec![0xff]);
+        let d = def.decoder(225, &t2, &c, &ini).unwrap();
+        assert_eq!(d.iter().map(|d| (d.code.as_str(), d.lid)).collect::<Vec<_>>(), [("01A", 0x86)]);
     }
 
     #[test]

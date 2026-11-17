@@ -299,9 +299,9 @@ fn bsi_composition_zones_et_defauts() {
         // bit d'indice 16 de la zone 84 = rang c9 dans cette composition -> 2CZ (CAL264, en émulation)
         let mut t = trames.clone();
         t.get_mut(&0x84).unwrap()[2] = 0x01;
-        let d = defauts.decoder(&t, &comp, &ini).unwrap();
+        let d = defauts.decoder(264, &t, &comp, &ini).unwrap();
         assert_eq!(d.iter().map(|d| (d.code.as_str(), d.rang)).collect::<Vec<_>>(), [("2CZ", 0xc9)]);
-        assert_eq!(defauts.table_libelles("CITROENC5"), Some("MENU906N"));
+        assert_eq!(defauts.table_libelles(264, "CITROENC5"), Some("MENU906N"));
     }
     assert!(s.fermer(bsi).unwrap(), "FIN_DIAG de la BSI, puis statut 00 00");
     assert_eq!(s.transport().echanges()[s.transport().position() - 1].heure, "18:27:54.400");
@@ -432,4 +432,47 @@ fn habitacle_par_la_bsi() {
         libelle(319, "0GZ"),
         "défaut permanent — Absence de communication avec l'autoradio"
     );
+}
+
+/// Calculateur d'habitacle dont la BSI garde les défauts, comme le test global du 2026-11-13 à 18:28:05 : joint par
+/// la BSI, composition téléchargée par sa propre commande `MAPPING` (familles C0 et 83), identification, puis comme
+/// son `LECTDEF` : fin de dialogue, zones 85 (refusée) et 86 de la BSI par `LEC_TRM_BSI`, nouvelle identification ;
+/// enfin fin de dialogue. Aucun défaut ce jour-là.
+#[test]
+fn defauts_gardes_par_la_bsi() {
+    let Some((gpc, _, mut rejeu)) = donnees() else {
+        return;
+    };
+    let (Some(lexia), Some(p)) = (env("FLEXIA_LEXIA"), env("FLEXIA_BSI_DEFAUTS")) else {
+        return;
+    };
+    let ini = psa_data::bsi::Ini::charger(lexia.join("DATA").join("BSI.ini")).unwrap();
+    let defauts = psa_data::bsi::DefautsBsi::charger(p).unwrap();
+    rejeu.aller_a_heure("18:27:54.40").unwrap();
+    let mut s = Session::new(rejeu, &gpc);
+    let bsi = s.ouvrir(psa_data::bsi::TYPE_BSI_X4).unwrap();
+    // le calculateur joint à 18:28:05 : le type dont le descripteur P_ est celui envoyé à la VCI
+    let mut joint = None;
+    for t in [359, 227, 225, 226] {
+        s.transport_mut().aller_a_heure("18:28:05.32").unwrap();
+        if let Ok(c) = s.joindre(&bsi, t) {
+            joint = Some(c);
+            break;
+        }
+    }
+    let canal = joint.expect("un des quatre types");
+    assert!(defauts.connait(canal.ecu_type_id));
+    let (comp, rep) = s.composition_bsi(&canal, &[0xC0, 0x83]).unwrap();
+    assert_eq!(rep.len(), 22, "C0 ×9 et 83 ×13, par la commande MAPPING du calculateur");
+    assert!(comp.contient(0x86) && !comp.contient(0x85));
+    let ident = s.identification(&canal).unwrap();
+    assert_eq!(ident.adresse(), 0x45);
+    assert_eq!(s.statut().unwrap(), [1, 0]);
+    let (d, trames) = s.lire_defauts_par_bsi(&canal, &comp, &ini, &defauts).unwrap();
+    assert!(d.is_empty(), "{d:?}");
+    assert_eq!(trames.keys().copied().collect::<Vec<_>>(), [0x86], "85 refusée par la BSI");
+    assert_eq!(trames[&0x86].len(), comp.taille(0x86, &ini).unwrap());
+    s.quitter(canal).unwrap();
+    assert_eq!(s.statut().unwrap(), [1, 0]);
+    assert_eq!(s.transport().echanges()[s.transport().position() - 1].heure, "18:28:08.433");
 }
