@@ -176,15 +176,16 @@ pub struct Identification {
     pub reference_psa: String,
     /// Code du fournisseur (ex. 5 = SAGEM/JCAE dans la base).
     pub fournisseur: u8,
-    /// « Référence complémentaire » : 10 chiffres.
-    pub reference_complementaire: String,
+    /// « Référence complémentaire » : 10 chiffres ; absente si ces octets ne sont pas des chiffres (ABS).
+    pub reference_complementaire: Option<String>,
     /// « Version diagnostic » : 2 chiffres hexadécimaux.
     pub version_diagnostic: String,
 }
 
 /// Décode l'identification `61 80 | réf. PSA (5 o) | 00 | fournisseur | réf. complémentaire (5 o) | 4 o | version diag`.
-/// Constaté sur l'injection S2000PM1 contre l'écran de Lexia du 2026-11-13. Rend `None` si la réponse n'a pas
-/// cette forme (les deux références doivent être des suites de chiffres) : elle reste alors à lire en brut.
+/// Constaté sur l'injection S2000PM1 contre l'écran de Lexia du 2026-11-13 ; supposé identique pour les
+/// autres calculateurs qui répondent `61 80` (ABS : même début, référence complémentaire non numérique).
+/// Rend `None` si la référence PSA n'est pas une suite de chiffres : la réponse reste alors à lire en brut.
 pub fn decode_identification(kwp: &[u8]) -> Option<Identification> {
     if kwp.len() < 19 || kwp[..2] != [0x61, 0x80] {
         return None;
@@ -196,7 +197,7 @@ pub fn decode_identification(kwp: &[u8]) -> Option<Identification> {
     Some(Identification {
         reference_psa: chiffres(&kwp[2..7])?,
         fournisseur: kwp[8],
-        reference_complementaire: chiffres(&kwp[9..14])?,
+        reference_complementaire: chiffres(&kwp[9..14]),
         version_diagnostic: format!("{:02X}", kwp[18]),
     })
 }
@@ -477,7 +478,9 @@ impl<'a, T: Transport> Session<'a, T> {
             let fe = zone(self, &[0xfe]).and_then(|r| decode_zone_fe(r.kwp()));
             champs.push(("FOURNISSEUR", id.fournisseur.to_string()));
             champs.push(("REF_PSA", id.reference_psa));
-            champs.push(("REFERENCE_SOFT", id.reference_complementaire));
+            if let Some(r) = id.reference_complementaire {
+                champs.push(("REFERENCE_SOFT", r));
+            }
             if let Some((indice, reference)) = fe {
                 champs.push(("REF_LOG", reference));
                 champs.push(("EDITIONSOFT", indice));
@@ -490,9 +493,23 @@ impl<'a, T: Transport> Session<'a, T> {
         Ok(IdentificationComplete { reponse, champs })
     }
 
-    /// Défauts mémorisés : `17 FF 00` par la commande générique, comme Lexia sur l'injection S2000PM1.
+    /// Défauts mémorisés (service `17`, réponse `57`). Lexia passe par la commande générique avec `17 FF 00`
+    /// sur l'injection S2000PM1 et le sac gonflable, et par `LECTURE_DEFAUTS` (données `FF 00` de la base)
+    /// sur l'ABS : les deux sont constatés sur la capture. Pour un autre calculateur, `LECTURE_DEFAUTS` est
+    /// préférée si son descripteur envoie bien le service `17`, sinon la commande générique.
     pub fn lire_defauts(&mut self, canal: &Canal) -> Result<Vec<Defaut>> {
-        decode_defauts(self.commande(canal, "GENERIQUE_HN", &[0x17, 0xFF, 0x00])?.kwp())
+        let nom = self.gpc.ecu_type(canal.ecu_type_id).map_or("", |t| t.name.as_str());
+        let par_generique = matches!(nom, "S2000PM1" | "SAC_TEMIC");
+        let dediee = self.gpc.command(canal.ecu_type_id, "LECTURE_DEFAUTS").is_some_and(|c| {
+            let d = canal.desc.get(&format!("{:02X}", c.code_com)).and_then(|d| d.d.first());
+            d.is_some_and(|d| d == "E17")
+        });
+        let rep = if dediee && !par_generique {
+            self.commande(canal, "LECTURE_DEFAUTS", &[])?
+        } else {
+            self.commande(canal, "GENERIQUE_HN", &[0x17, 0xFF, 0x00])?
+        };
+        decode_defauts(rep.kwp())
     }
 
     /// Lit une trame de mesures (`LEC_TRM` + requête de la trame) et décode ses fiches.
@@ -532,10 +549,16 @@ mod tests {
         let id = decode_identification(&kwp).unwrap();
         assert_eq!(id.reference_psa, "9612345680");
         assert_eq!(id.fournisseur, 5);
-        assert_eq!(id.reference_complementaire, "9665432180");
+        assert_eq!(id.reference_complementaire.as_deref(), Some("9665432180"));
         assert_eq!(id.version_diagnostic, "0D");
         assert!(decode_identification(&kwp[..18]).is_none());
-        kwp[3] = 0xAB; // pas une suite de chiffres
+        kwp[10] = 0xAB; // référence complémentaire non numérique : les autres champs restent
+        let id = decode_identification(&kwp).unwrap();
+        assert_eq!(
+            (id.reference_psa.as_str(), id.reference_complementaire),
+            ("9612345680", None)
+        );
+        kwp[3] = 0xAB; // référence PSA non numérique : pas une identification de cette forme
         assert!(decode_identification(&kwp).is_none());
         kwp[1] = 0x81;
         assert!(decode_identification(&kwp).is_none());

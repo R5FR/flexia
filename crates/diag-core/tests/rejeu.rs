@@ -45,7 +45,7 @@ fn session_injection() {
     assert_eq!(
         (
             champs.reference_psa.as_str(),
-            champs.reference_complementaire.as_str(),
+            champs.reference_complementaire.as_deref().unwrap(),
             champs.version_diagnostic.as_str()
         ),
         ("9644674580", "9655212680", "0D")
@@ -258,4 +258,28 @@ fn identification_comme_lexia() {
     );
     // la BSI n'est pas une injection S2000 : pas de lecture supplémentaire
     assert!(diag_core::decode_zone_fe(id.reponse.kwp()).is_none());
+}
+
+/// ABS MK60 de la C5 (type 233, canal 54, adresse 20) : même séquence que le test global de Lexia.
+#[test]
+fn abs_identification_et_defauts() {
+    let Some((gpc, _, mut rejeu)) = donnees() else {
+        return;
+    };
+    const ABS_MK60: i64 = 233;
+    let debut = rejeu.aller_a_heure("18:28:41.30").unwrap();
+    let mut s = Session::new(rejeu, &gpc);
+    let canal = s.ouvrir(ABS_MK60).unwrap();
+    assert_eq!(canal.code_cal, 0x54);
+    let id = s.identification_complete(&canal).unwrap();
+    assert_eq!(id.reponse.adresse(), 0x20);
+    let champs: Vec<(&str, &str)> = id.champs.iter().map(|(n, v)| (*n, v.as_str())).collect();
+    assert_eq!(
+        champs,
+        [("FOURNISSEUR", "9"), ("REF_PSA", "9641767380"), ("VERSION_DIAG", "0B")]
+    );
+    assert_eq!(s.statut().unwrap(), [1, 0]);
+    assert!(s.lire_defauts(&canal).unwrap().is_empty(), "57 00 : aucun défaut");
+    assert!(s.fermer(canal).unwrap());
+    assert_eq!(s.transport().position(), debut + 9);
 }
