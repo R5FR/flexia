@@ -6,8 +6,12 @@
 //! - [`gpc`] : base véhicule (calculateurs, commandes nommées, protocoles) ;
 //! - [`libelles`] : libellés de la base (défauts) résolus dans les dictionnaires ;
 //! - [`mesures`] : tables de mesures des modules `CAL<n>` (dictionnaire TSV) ;
-//! - [`descr`] : descripteurs de la VCI (`SUPER*.PC`, `*.68K`, `P_*.pro`).
+//! - [`descr`] : descripteurs de la VCI (`SUPER*.PC`, `*.68K`, `P_*.pro`) ;
+//! - [`defauts`] : défauts en champs de bits des modules `CAL<n>` (dictionnaire TSV) ;
+//! - [`dbf`] : tables dBase de la documentation (libellés de ces défauts).
 
+pub mod dbf;
+pub mod defauts;
 pub mod descr;
 pub mod dico;
 pub mod gpc;

@@ -7,6 +7,8 @@
 //! @\+             séparateur de parties (organe, puis nature du défaut…)
 //! @\*2            valeur qui remplace le prochain « * » de la partie en cours (« bobine * » -> « bobine 2 »)
 //! @T. …           texte littéral
+//! @\n             saut de ligne : ce qui précède est un en-tête (tables de défauts des menus SGML, où le
+//!                 statut, « défaut fugitif », précède l'organe et la nature du défaut)
 //! ```
 
 use crate::dico::Dico;
@@ -24,6 +26,8 @@ pub enum Element {
         numero: usize,
     },
     Separateur,
+    /// Saut de ligne : la ligne en cours devient une ligne d'en-tête.
+    Ligne,
     /// Valeur du prochain `*` de la partie en cours.
     Valeur(String),
     Texte(String),
@@ -52,6 +56,8 @@ pub fn analyser(brut: &str) -> Vec<Element> {
             p
         } else if m == "\\+" {
             Element::Separateur
+        } else if m == "\\n" {
+            Element::Ligne
         } else if let Some(v) = m.strip_prefix("\\*") {
             Element::Valeur(v.to_string())
         } else if let Some(t) = m.strip_prefix('T') {
@@ -63,25 +69,35 @@ pub fn analyser(brut: &str) -> Vec<Element> {
     elements
 }
 
-/// Libellé résolu : une ou plusieurs parties (la première désigne en général l'organe).
+/// Libellé résolu : une ou plusieurs parties (la première désigne en général l'organe), précédées
+/// éventuellement de lignes d'en-tête (ex. « défaut fugitif »).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Libelle {
+    pub entete: Vec<String>,
     pub parties: Vec<String>,
 }
 
 impl fmt::Display for Libelle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.parties.split_first() {
-            None => Ok(()),
-            Some((tete, [])) => write!(f, "{tete}"),
-            Some((tete, reste)) => write!(f, "{tete} : {}", reste.join(", ")),
-        }
+        let corps = match self.parties.split_first() {
+            None => String::new(),
+            Some((tete, [])) => tete.clone(),
+            Some((tete, reste)) => format!("{tete} : {}", reste.join(", ")),
+        };
+        let lignes: Vec<&str> = self
+            .entete
+            .iter()
+            .map(String::as_str)
+            .chain((!corps.is_empty()).then_some(corps.as_str()))
+            .collect();
+        write!(f, "{}", lignes.join(" — "))
     }
 }
 
 /// Résout un libellé brut ; `phrase(dico, numero)` rend le texte d'une phrase (numéro à partir de 1).
 /// Une phrase introuvable reste visible sous la forme `[P<n>-<DICO>]`.
 pub fn resoudre(brut: &str, mut phrase: impl FnMut(&str, usize) -> Option<String>) -> Libelle {
+    let mut entete = Vec::new();
     let mut parties = Vec::new();
     let mut courante = String::new();
     let mut apres_phrase = false;
@@ -96,6 +112,18 @@ pub fn resoudre(brut: &str, mut phrase: impl FnMut(&str, usize) -> Option<String
                 continue;
             }
             Element::Separateur => parties.push(std::mem::take(&mut courante)),
+            Element::Ligne => {
+                parties.push(std::mem::take(&mut courante));
+                let ligne = std::mem::take(&mut parties)
+                    .into_iter()
+                    .map(|p| p.trim().to_string())
+                    .filter(|p| !p.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" : ");
+                if !ligne.is_empty() {
+                    entete.push(ligne);
+                }
+            }
             Element::Valeur(v) => match courante.find('*') {
                 Some(i) => courante.replace_range(i..=i, &v),
                 None if v.is_empty() => {}
@@ -110,6 +138,7 @@ pub fn resoudre(brut: &str, mut phrase: impl FnMut(&str, usize) -> Option<String
     }
     parties.push(courante);
     Libelle {
+        entete,
         parties: parties
             .into_iter()
             .map(|p| p.trim().to_string())
@@ -299,5 +328,22 @@ mod tests {
         );
         assert_eq!(resoudre("@P1-DIC@P2-DIC", phrase).parties, ["Organe Rupture"]);
         assert!(resoudre("", phrase).parties.is_empty());
+    }
+
+    /// Forme des tables de défauts des menus SGML (`MENU904H.DBF`) : statut, saut de ligne, organe et nature.
+    #[test]
+    fn saut_de_ligne() {
+        assert_eq!(analyser("@P1-DIC@\\n@P2-DIC")[1], Element::Ligne);
+        let l = resoudre("@P1-DIC@\\n@P3-DIC@\\*4@\\+@P2-DIC", phrase);
+        assert_eq!(
+            (l.entete.as_slice(), l.parties.as_slice()),
+            (
+                &["Organe".to_string()][..],
+                &["Bobine 4".to_string(), "Rupture".to_string()][..]
+            )
+        );
+        assert_eq!(l.to_string(), "Organe — Bobine 4 : Rupture");
+        assert_eq!(resoudre("@P2-DIC@\\n", phrase).to_string(), "Rupture");
+        assert!(resoudre("@P1-DIC", phrase).entete.is_empty());
     }
 }
