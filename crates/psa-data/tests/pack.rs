@@ -268,3 +268,29 @@ fn parametres_injection() {
     assert_eq!(txt(&par("REF_PSA").libelle), "Référence PSA");
     assert!(g.parametres(999_999).unwrap().is_empty());
 }
+
+/// Passerelle des calculateurs d'habitacle : la BSI de la C5 (type 264, comme dans le test global de Lexia).
+#[test]
+fn passerelle_c5() {
+    use psa_data::gpc::Gpc;
+    let Some(fdb) = dossier("FLEXIA_FDB") else {
+        return;
+    };
+    let g = Gpc::open(fdb.join("GPC.FDB")).unwrap();
+    let nom = |t: Option<&psa_data::gpc::EcuType>| t.map(|t| (t.id, t.name.clone()));
+    let bsi = Some((264, "BSI".to_string()));
+    for combine_clim_afficheur in [246, 270, 319] {
+        assert_eq!(nom(g.passerelle(combine_clim_afficheur, Some("CITROENC5"))), bsi);
+    }
+    assert_eq!(
+        nom(g.passerelle(246, None)),
+        bsi,
+        "le combiné 246 n'existe que sur la C5"
+    );
+    assert!(g.passerelle(264, Some("CITROENC5")).is_none(), "la BSI elle-même");
+    assert!(
+        g.passerelle(356, Some("CITROENC5")).is_none(),
+        "l'injection est sur la ligne K (canal 8e)"
+    );
+    assert!(g.passerelle(246, Some("INCONNU")).is_none());
+}

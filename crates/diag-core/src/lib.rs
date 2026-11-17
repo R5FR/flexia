@@ -4,6 +4,7 @@
 pub mod garde;
 
 use garde::Refus;
+use psa_data::defauts::TableBits;
 use psa_data::descr::{self, Cmd68k};
 use psa_data::gpc::Gpc;
 use psa_data::mesures::Trame;
@@ -15,6 +16,8 @@ use vci::{etat, Request, Response, Transport, VciError, CAL_SYSTEME};
 pub const PAUSE_APRES_RESET: std::time::Duration = std::time::Duration::from_millis(100);
 /// Statut de la VCI sans session calculateur ouverte ; `01 00` quand une session est ouverte.
 pub const STATUT_REPOS: [u8; 2] = [0, 0];
+/// Statut de la VCI pendant une session calculateur (constaté : la VCI entretient elle-même la session).
+pub const STATUT_SESSION: [u8; 2] = [1, 0];
 
 /// Commandes système de la VCI utilisées.
 pub mod sys {
@@ -157,10 +160,29 @@ impl ReponseEcu {
 /// Code défaut lu dans le calculateur.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Defaut {
-    /// Code à 5 caractères, ex. `P0420`.
+    /// Code KWP à 5 caractères (`P0420`), ou code méthode PSA à 3 caractères (`H7X`) pour un calculateur
+    /// à champs de bits.
     pub code: String,
+    /// Code KWP brut ; 0 pour un code méthode.
     pub brut: u16,
+    /// Octet de statut KWP ; 0 pour un code méthode.
     pub statut: u8,
+    /// Code méthode lu dans une zone en champs de bits (combiné, climatisation, afficheur…).
+    pub methode: bool,
+}
+
+/// Défauts d'une réponse en champs de bits, par la table du module (voir [`psa_data::defauts`]).
+pub fn decode_defauts_bits(table: &TableBits, kwp: &[u8]) -> Vec<Defaut> {
+    table
+        .decoder(kwp)
+        .into_iter()
+        .map(|code| Defaut {
+            code,
+            brut: 0,
+            statut: 0,
+            methode: true,
+        })
+        .collect()
 }
 
 /// Code défaut normalisé : 2 bits de lettre (P, C, B, U) puis 4 chiffres.
@@ -285,6 +307,7 @@ pub fn decode_defauts(kwp: &[u8]) -> Result<Vec<Defaut>> {
                 code: code_defaut(brut),
                 brut,
                 statut: c[2],
+                methode: false,
             }
         })
         .collect())
@@ -367,6 +390,68 @@ impl<'a, T: Transport> Session<'a, T> {
 
     /// Ouvre le canal d'un type de calculateur : statut, chargement des descripteurs `C_` puis `P_*.68K`, `INIT`.
     pub fn ouvrir(&mut self, ecu_type_id: i64) -> Result<Canal> {
+        let (canal, config, protocole) = self.descripteurs(ecu_type_id)?;
+        self.statut()?;
+        for (com, data, nom) in [(sys::CONFIG, &config, "C_"), (sys::PROTOCOLE, &protocole, "P_")] {
+            let rep = self.systeme(com, data)?;
+            if !matches!(rep.etat, etat::REPONSE | etat::ACCEPTE) {
+                return Err(Error::Etat {
+                    etat: rep.etat,
+                    contexte: format!("chargement du descripteur {nom}"),
+                });
+            }
+        }
+        self.commande(&canal, "INIT", &[])?;
+        Ok(canal)
+    }
+
+    /// Calculateur joint à travers la passerelle (la BSI) dont la session est ouverte, comme le test global de
+    /// Lexia (constaté le 2026-11-13 sur la C5 : combiné, climatisation, afficheur, sac gonflable) : statut,
+    /// puis chargement du seul descripteur `P_*.68K` du calculateur, sans nouvel `INIT`. La VCI répond par le
+    /// nombre d'enregistrements de 45 octets chargés (`9a` = 154 pour les 6 930 octets de `p_comb7a`). Les
+    /// commandes suivantes vont au calculateur ; la session de la passerelle reste ouverte.
+    pub fn joindre(&mut self, passerelle: &Canal, ecu_type_id: i64) -> Result<Canal> {
+        let (canal, _, protocole) = self.descripteurs(ecu_type_id)?;
+        if canal.code_cal != passerelle.code_cal {
+            return Err(Error::Donnee(format!(
+                "le type {ecu_type_id} est sur le canal {:02x}, la passerelle sur {:02x}",
+                canal.code_cal, passerelle.code_cal
+            )));
+        }
+        self.statut()?;
+        let rep = self.systeme(sys::PROTOCOLE, &protocole)?;
+        let attendu = (protocole.len() / 45) as u8;
+        if rep.etat != etat::REPONSE || rep.data.first() != Some(&attendu) {
+            return Err(Error::Etat {
+                etat: rep.etat,
+                contexte: format!(
+                    "chargement du descripteur P_ du type {ecu_type_id} (réponse {:02x?})",
+                    rep.data
+                ),
+            });
+        }
+        Ok(canal)
+    }
+
+    /// Fin du dialogue avec un calculateur joint : sa commande `FIN_DIAG` (réponse `c2` du calculateur). La
+    /// session de la passerelle reste ouverte (statut `01 00`) ; elle se ferme ensuite par [`Session::fermer`].
+    /// Pas de relecture du statut ici : dans la capture, Lexia la fait ou non selon le calculateur suivant.
+    pub fn quitter(&mut self, canal: Canal) -> Result<()> {
+        self.commande(&canal, "FIN_DIAG", &[])?;
+        Ok(())
+    }
+
+    /// Défauts d'un calculateur à champs de bits : la commande de sa table (ex. `LECTURE_DEFAUTS`, `c3` venant
+    /// de la base ; `LEC_TRM` + `83` pour l'afficheur), puis le décodage par la table.
+    pub fn lire_defauts_bits(&mut self, canal: &Canal, table: &TableBits) -> Result<(ReponseEcu, Vec<Defaut>)> {
+        let rep = self.commande(canal, &table.commande, &table.donnees)?;
+        let defauts = decode_defauts_bits(table, rep.kwp());
+        Ok((rep, defauts))
+    }
+
+    /// Canal (sans échange) et descripteurs `C_` et `P_` d'un type de calculateur ; règle aussi les délais de
+    /// la VCI pour son canal (table `.PC` du protocole).
+    fn descripteurs(&mut self, ecu_type_id: i64) -> Result<(Canal, Vec<u8>, Vec<u8>)> {
         let manque = |quoi: &str| Error::Donnee(format!("{quoi} du type de calculateur {ecu_type_id}"));
         let prot = self.gpc.protocol_of(ecu_type_id).ok_or_else(|| manque("protocole"))?;
         let code_cal = self
@@ -402,24 +487,12 @@ impl<'a, T: Transport> Session<'a, T> {
             .map(|r| (r.code, r.delai))
             .collect();
         self.vci.definir_tempos(code_cal, &tempos);
-
-        self.statut()?;
-        for (com, data, nom) in [(sys::CONFIG, &config, "C_"), (sys::PROTOCOLE, &protocole, "P_")] {
-            let rep = self.systeme(com, data)?;
-            if !matches!(rep.etat, etat::REPONSE | etat::ACCEPTE) {
-                return Err(Error::Etat {
-                    etat: rep.etat,
-                    contexte: format!("chargement du descripteur {nom}"),
-                });
-            }
-        }
         let canal = Canal {
             ecu_type_id,
             code_cal,
             desc,
         };
-        self.commande(&canal, "INIT", &[])?;
-        Ok(canal)
+        Ok((canal, config, protocole))
     }
 
     /// Envoie une commande nommée ; `extra` s'ajoute aux données fixes de la base.
@@ -593,7 +666,8 @@ mod tests {
             [Defaut {
                 code: "P0420".into(),
                 brut: 0x0420,
-                statut: 0x28
+                statut: 0x28,
+                methode: false,
             }]
         );
         assert!(decode_defauts(&[0x57, 0x00]).unwrap().is_empty());

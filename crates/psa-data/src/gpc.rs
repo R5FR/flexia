@@ -64,6 +64,9 @@ pub struct Family {
     /// Adresse cible sur la ligne de diagnostic (hexadécimal), ex. `10`.
     pub target: String,
     pub mux: bool,
+    /// Famille passerelle (`FAMTYPE.FAMGATEWAY = 1`) : la BSI (`BMF`), par laquelle passent les calculateurs
+    /// d'habitacle.
+    pub passerelle: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,26 +139,29 @@ impl Gpc {
             })
             .collect::<Result<_>>()?;
 
-        let famtypes: Vec<(i64, String)> = db
+        let famtypes: Vec<(i64, String, bool)> = db
             .rows("FAMTYPE", false)?
             .iter()
-            .map(|r| Ok((req(r, "FAMTYPE", "FAMTYID")?, text(r, "FAMNAME"))))
+            .map(|r| {
+                Ok((
+                    req(r, "FAMTYPE", "FAMTYID")?,
+                    text(r, "FAMNAME"),
+                    int(r, "FAMGATEWAY") == Some(1),
+                ))
+            })
             .collect::<Result<_>>()?;
         let families = db
             .rows("FAMILY", false)?
             .iter()
             .map(|r| {
-                let ty = int(r, "FAMTYID");
+                let ty = famtypes.iter().find(|(i, _, _)| Some(*i) == int(r, "FAMTYID"));
                 Ok(Family {
                     id: req(r, "FAMILY", "FAMID")?,
                     veh_id: req(r, "FAMILY", "VEHID")?,
-                    name: famtypes
-                        .iter()
-                        .find(|(i, _)| Some(*i) == ty)
-                        .map(|(_, n)| n.clone())
-                        .unwrap_or_default(),
+                    name: ty.map(|(_, n, _)| n.clone()).unwrap_or_default(),
                     target: text(r, "FAMCODETARGET"),
                     mux: int(r, "FAMMUX") == Some(1),
+                    passerelle: ty.is_some_and(|(_, _, g)| *g),
                 })
             })
             .collect::<Result<_>>()?;
@@ -389,5 +395,48 @@ impl Gpc {
             }
         }
         out
+    }
+
+    /// Type de calculateur passerelle (famille `FAMGATEWAY = 1`, la BSI) par lequel Lexia joint un calculateur
+    /// du même canal pendant le test global : constaté le 2026-11-13 sur la C5 pour le combiné, la
+    /// climatisation, l'afficheur et le sac gonflable (canal `7a`, session ouverte avec la BSI). Pour chaque
+    /// véhicule où le type existe (seulement `vehicule` s'il est donné), le premier calculateur de la famille
+    /// passerelle sur le même canal ; `None` si le type est lui-même dans une famille passerelle, s'il n'y a pas
+    /// de passerelle sur son canal, ou si les véhicules ne s'accordent pas.
+    pub fn passerelle(&self, ecu_type_id: i64, vehicule: Option<&str>) -> Option<&EcuType> {
+        let canal = |id: i64| self.commands_of(id).next().map(|c| c.code_cal);
+        let code_cal = canal(ecu_type_id)?;
+        let veh_id = match vehicule {
+            Some(v) => Some(self.vehicule(v)?.id),
+            None => None,
+        };
+        let familles: Vec<&Family> = self
+            .ecus
+            .iter()
+            .filter(|e| e.ecu_type_id == ecu_type_id)
+            .filter_map(|e| self.families.iter().find(|f| f.id == e.fam_id))
+            .filter(|f| veh_id.is_none_or(|v| f.veh_id == v))
+            .collect();
+        if familles.is_empty() || familles.iter().any(|f| f.passerelle) {
+            return None;
+        }
+        let mut choix: Option<i64> = None;
+        let mut vus = Vec::new();
+        for f in familles {
+            if vus.contains(&f.veh_id) {
+                continue;
+            }
+            vus.push(f.veh_id);
+            let p = self
+                .ecus_of_vehicule(f.veh_id)
+                .into_iter()
+                .find(|(fp, _, t)| fp.passerelle && canal(t.id) == Some(code_cal))
+                .map(|(_, _, t)| t.id)?;
+            if choix.is_some_and(|c| c != p) {
+                return None;
+            }
+            choix = Some(p);
+        }
+        self.ecu_type(choix?)
     }
 }

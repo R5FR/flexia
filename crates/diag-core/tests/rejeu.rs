@@ -283,3 +283,78 @@ fn abs_identification_et_defauts() {
     assert!(s.fermer(canal).unwrap());
     assert_eq!(s.transport().position(), debut + 9);
 }
+
+/// Test global du 13/11 : combiné (246), climatisation (270) et afficheur (319) joints par la BSI, dont la
+/// session reste ouverte, avec exactement les échanges de Lexia : statut, descripteur `P_` du calculateur
+/// (la VCI répond par le nombre d'enregistrements chargés), identification, statut, lecture des défauts,
+/// `FIN_DIAG` ; enfin `FIN_DIAG` de la BSI. Défauts décodés par les tables des modules (`FLEXIA_DEFAUTS`).
+#[test]
+fn habitacle_par_la_bsi() {
+    let Some((gpc, _, mut rejeu)) = donnees() else {
+        return;
+    };
+    let Some(tsv) = env("FLEXIA_DEFAUTS") else {
+        return;
+    };
+    let dico = psa_data::defauts::DictionnaireDefauts::charger(tsv).unwrap();
+    const BSI_X4: i64 = 264;
+    let debut = rejeu.aller_a_heure("18:27:54.40").unwrap();
+    let mut s = Session::new(rejeu, &gpc);
+    let bsi = s.ouvrir(BSI_X4).unwrap();
+    assert_eq!(s.transport().position(), debut + 5, "fe, C_, P_ en deux blocs, INIT");
+    // Lexia lit alors les zones de la BSI ; reprise au chargement du descripteur du combiné
+    s.transport_mut().aller_a_heure("18:27:58.55").unwrap();
+    let lire = |s: &mut Session<'_, Replay>, id: i64| -> (u8, Vec<String>) {
+        let canal = s.joindre(&bsi, id).unwrap();
+        let ident = s.identification(&canal).unwrap();
+        assert_eq!(s.statut().unwrap(), [1, 0]);
+        let table = dico.table(id, Some("CITROENC5")).unwrap();
+        let (_, d) = s.lire_defauts_bits(&canal, table).unwrap();
+        assert!(d.iter().all(|d| d.methode));
+        s.quitter(canal).unwrap();
+        (ident.adresse(), d.into_iter().map(|d| d.code).collect())
+    };
+    // combiné : 61 c3 00 00 00 00 e0 00 -> trois défauts fugitifs
+    assert_eq!(
+        lire(&mut s, 246),
+        (0x5b, vec!["H7X".into(), "H8X".into(), "H9X".into()])
+    );
+    assert_eq!(
+        s.statut().unwrap(),
+        [1, 0],
+        "Lexia relit le statut avant le calculateur suivant"
+    );
+    // climatisation : 61 c4 00×9 80 -> un défaut fugitif (bit 80 de l'octet 11)
+    assert_eq!(lire(&mut s, 270), (0x31, vec!["HAA".into()]));
+    // afficheur : seconde passe de Lexia (la première ne lit que l'identification)
+    s.transport_mut().aller_a_heure("18:28:18.82").unwrap();
+    assert_eq!(lire(&mut s, 319), (0xb5, vec!["0GZ".into()]));
+    assert!(s.fermer(bsi).unwrap(), "FIN_DIAG de la BSI (7a 02), puis statut 00 00");
+    let fin = s.transport().position();
+    assert_eq!(s.transport().echanges()[fin - 1].heure, "18:28:19.943");
+
+    // libellés : table du menu « Lecture défauts » de chaque calculateur, phrases des dictionnaires
+    let Some(lexia) = env("FLEXIA_LEXIA") else {
+        return;
+    };
+    let dicos = psa_data::libelles::Dicos::new(lexia.join("DICO"), "FR");
+    let libelle = |id: i64, code: &str| {
+        let table = dico.table_libelles(id, "CITROENC5").unwrap();
+        let phrases =
+            psa_data::dbf::libelles_defauts(lexia.join("SGML").join("Menu").join(format!("{table}.DBF"))).unwrap();
+        dicos.libelle(&phrases[code]).to_string()
+    };
+    assert_eq!(
+        libelle(246, "H7X"),
+        "défaut fugitif — Régime moteur : valeur reçue incorrecte"
+    );
+    assert_eq!(
+        libelle(246, "H9X"),
+        "défaut fugitif — Vitesse véhicule : valeur reçue incorrecte"
+    );
+    assert_eq!(libelle(270, "HAA"), "défaut fugitif — Pulseur : Circuit ouvert");
+    assert_eq!(
+        libelle(319, "0GZ"),
+        "défaut permanent — Absence de communication avec l'autoradio"
+    );
+}
