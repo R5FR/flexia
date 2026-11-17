@@ -33,6 +33,28 @@ pub const NOMS_REFUSES: [&str; 14] = [
     "MAPPING",
 ];
 
+/// Débuts de nom refusés : écritures, effacements, téléchargements, pilotages (ex. `TELECODAGE1`,
+/// `ECR_CONFIG`, `ECRITURE_ZONE_HIST`, `WRITE_MODE_FONC`, `EFFACE_FLASH_STATUS`).
+pub const PREFIXES_REFUSES: [&str; 12] = [
+    "TELECODAGE",
+    "ECR",
+    "WRITE",
+    "EFFACE",
+    "RAZ",
+    "RESET",
+    "TELECHARG",
+    "PILOTAGE",
+    "ACTIVATION",
+    "SECURITY_ACCESS",
+    "DEMARRE_ROUTINE",
+    "ARRET_ROUTINE",
+];
+
+/// Vrai si le nom de la commande suffit à la refuser, sans regarder son service.
+pub fn nom_refuse(nom: &str) -> bool {
+    NOMS_REFUSES.contains(&nom) || PREFIXES_REFUSES.iter().any(|p| nom.starts_with(p))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refus {
     Systeme(u8),
@@ -86,12 +108,30 @@ pub fn service(desc: Option<&Cmd68k>, data: &[u8]) -> Result<u8, Refus> {
     Err(inconnu())
 }
 
+/// Service d'une trame KWP2000 complète à adressage physique : `8L cible source SID … somme`, avec
+/// L = nombre d'octets de données et somme = somme des octets précédents modulo 256. `None` sinon.
+pub fn service_trame_complete(data: &[u8]) -> Option<u8> {
+    let (&somme, corps) = data.split_last()?;
+    let longueur = usize::from(*corps.first()? & 0x3F);
+    let coherent = corps[0] & 0xC0 == 0x80
+        && longueur >= 1
+        && corps.len() == 3 + longueur
+        && corps.iter().fold(0u8, |a, b| a.wrapping_add(*b)) == somme;
+    coherent.then(|| corps[3])
+}
+
 /// Autorise ou refuse une commande nommée d'un calculateur.
 pub fn commande(nom: &str, desc: Option<&Cmd68k>, data: &[u8]) -> Result<(), Refus> {
-    if NOMS_REFUSES.contains(&nom) {
+    if nom_refuse(nom) {
         return Err(Refus::Nom(nom.to_string()));
     }
-    let s = service(desc, data)?;
+    // Certains protocoles (BSI) n'ont pas de descripteur pour INIT : la base fournit la trame complète
+    // (`81 d0 f1 81 c3`, constaté sur capture). Seul INIT a droit à cette forme, et elle est vérifiée.
+    let s = match (desc, nom) {
+        (None, "INIT") => service_trame_complete(data)
+            .ok_or_else(|| Refus::ServiceInconnu("INIT sans descripteur : trame complète attendue".into()))?,
+        _ => service(desc, data)?,
+    };
     SERVICES_AUTORISES.contains(&s).then_some(()).ok_or(Refus::Service(s))
 }
 
@@ -137,6 +177,56 @@ mod tests {
             commande("LECTURE_DEFAUTS", Some(&d(&["E14", "E--1  1+"])), &[0xff, 0]),
             Err(Refus::Service(0x14))
         );
+    }
+
+    #[test]
+    fn init_par_trame_complete() {
+        let init = [0x81, 0xd0, 0xf1, 0x81, 0xc3];
+        assert_eq!(service_trame_complete(&init), Some(0x81));
+        assert!(commande("INIT", None, &init).is_ok());
+        // même trame sous un autre nom : refusée
+        assert!(matches!(
+            commande("LEC_TRM", None, &init),
+            Err(Refus::ServiceInconnu(_))
+        ));
+        // somme fausse, longueur fausse, adressage fonctionnel, trame vide
+        assert_eq!(service_trame_complete(&[0x81, 0xd0, 0xf1, 0x81, 0xc4]), None);
+        assert_eq!(service_trame_complete(&[0x82, 0xd0, 0xf1, 0x81, 0xc4]), None);
+        assert_eq!(service_trame_complete(&[0xc1, 0xd0, 0xf1, 0x81, 0x03]), None);
+        assert_eq!(service_trame_complete(&[]), None);
+        assert!(matches!(commande("INIT", None, &[]), Err(Refus::ServiceInconnu(_))));
+        // trame complète bien formée mais service d'écriture (14 = effacement) : refusée
+        let efface = [0x83, 0xd0, 0xf1, 0x14, 0xff, 0x00, 0x57];
+        assert_eq!(service_trame_complete(&efface), Some(0x14));
+        assert_eq!(commande("INIT", None, &efface), Err(Refus::Service(0x14)));
+    }
+
+    #[test]
+    fn noms_refuses() {
+        for nom in [
+            "TELECODAGE",
+            "TELECODAGE1",
+            "ECR_CONFIG",
+            "ECRITURE_ZONE_HIST",
+            "WRITE_MODE_FONC",
+            "RESET_ECU",
+        ] {
+            assert!(nom_refuse(nom), "{nom}");
+            assert_eq!(commande(nom, Some(&d(&["E21"])), &[]), Err(Refus::Nom(nom.into())));
+        }
+        for nom in [
+            "INIT",
+            "FIN_DIAG",
+            "TP",
+            "IDENTIFICATION",
+            "IDENTIFICATION_1",
+            "LEC_TRM",
+            "LECTURE_DEFAUTS",
+        ] {
+            assert!(!nom_refuse(nom), "{nom}");
+        }
+        // un nom de lecture ne protège pas : le service est toujours contrôlé
+        assert_eq!(commande("LEC_TRM", Some(&d(&["E3B"])), &[]), Err(Refus::Service(0x3B)));
     }
 
     #[test]

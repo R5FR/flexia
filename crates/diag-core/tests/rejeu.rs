@@ -158,18 +158,14 @@ fn ecritures_de_la_base_refusees() {
     };
     let gpc = Gpc::open(fdb.join("GPC.FDB")).unwrap();
     let mut n = 0;
-    for c in gpc
-        .commands
-        .iter()
-        .filter(|c| diag_core::garde::NOMS_REFUSES.contains(&c.name.as_str()))
-    {
+    for c in gpc.commands.iter().filter(|c| diag_core::garde::nom_refuse(&c.name)) {
         assert!(matches!(
             diag_core::garde::commande(&c.name, None, &c.data),
             Err(Refus::Nom(_))
         ));
         n += 1;
     }
-    assert!(n > 2500, "{n}");
+    assert!(n > 3500, "{n}");
 }
 
 /// Phase de connexion : réinitialisation, démarrage du firmware, statut, version, voltmètre.
@@ -187,4 +183,51 @@ fn connexion_vci() {
     s.transport_mut().aller_a(13);
     s.statut().unwrap();
     assert_eq!(s.voltmetre().unwrap(), 0x0b56);
+}
+
+/// BSI de la C5 (type 264, canal 7a) : ouverture comme Lexia (INIT par trame complète), lecture de la
+/// zone b0, qui contient le VIN (déjà masqué dans la capture enregistrée).
+#[test]
+fn bsi_ouverture_et_zone_vin() {
+    let Some((gpc, _, mut rejeu)) = donnees() else {
+        return;
+    };
+    const BSI_X4: i64 = 264;
+    rejeu.aller_a(21);
+    let mut s = Session::new(rejeu, &gpc);
+    let canal = s.ouvrir(BSI_X4).unwrap();
+    assert_eq!(
+        (canal.code_cal, s.transport().position()),
+        (0x7a, 26),
+        "fe, C_, P_ en deux blocs, INIT"
+    );
+    assert_eq!(s.statut().unwrap(), [1, 0]);
+    let zone = s.commande(&canal, "IDENTIFICATION_1", &[]).unwrap();
+    assert_eq!((zone.adresse(), &zone.kwp()[..2]), (0xd0, &[0x61, 0xb0][..]));
+    let masque = vci::masquer_vin(zone.kwp());
+    // la capture enregistrée a déjà son VIN masqué : le masquage ne doit rien y changer
+    assert_eq!(masque, zone.kwp());
+    assert_eq!(zone.kwp().len(), 19, "61 b0 + 17 caractères");
+    assert_eq!(&masque[5..15], b"XXXXXXXXXX");
+    assert_eq!(masque.len(), zone.kwp().len());
+    // écritures de la BSI refusées sans envoi
+    let avant = s.transport().position();
+    for nom in [
+        "TELECODAGE",
+        "TELECODAGE1",
+        "MAPPING",
+        "ACTIVATION",
+        "EFFACE_DEFAUTS",
+        "RESET_ECU",
+        "TELECHARGEMENT",
+    ] {
+        assert!(
+            matches!(s.commande(&canal, nom, &[0]), Err(Error::Refus(Refus::Nom(_)))),
+            "{nom}"
+        );
+    }
+    for nom in ["WRITE_MODE_FONC", "ECR_PROTECT", "ECR_CONFIG"] {
+        assert!(matches!(s.commande(&canal, nom, &[0]), Err(Error::Refus(_))), "{nom}");
+    }
+    assert_eq!(s.transport().position(), avant);
 }

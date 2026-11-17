@@ -132,7 +132,24 @@ pub trait Transport {
     fn definir_tempos(&mut self, _code_cal: u8, _tempos: &[(u8, u32)]) {}
 }
 
-/// Transport qui écrit chaque échange sur la sortie d'erreur, puis le délègue.
+/// Remplace par des `X` les 10 caractères du milieu de tout numéro de série véhicule (VIN) présent en ASCII :
+/// 17 caractères de l'alphabet VIN commençant par `VF`. Les 3 premiers et les 4 derniers restent lisibles.
+pub fn masquer_vin(octets: &[u8]) -> Vec<u8> {
+    let vin = |c: u8| c.is_ascii_digit() || (c.is_ascii_uppercase() && !matches!(c, b'I' | b'O' | b'Q'));
+    let mut sortie = octets.to_vec();
+    let mut i = 0;
+    while i + 17 <= sortie.len() {
+        if sortie[i..i + 2] == *b"VF" && sortie[i..i + 17].iter().all(|&c| vin(c)) {
+            sortie[i + 3..i + 13].fill(b'X');
+            i += 17;
+        } else {
+            i += 1;
+        }
+    }
+    sortie
+}
+
+/// Transport qui écrit chaque échange sur la sortie d'erreur (VIN masqué), puis le délègue.
 pub struct Trace<T>(pub T);
 
 impl<T: Transport> Transport for Trace<T> {
@@ -142,7 +159,11 @@ impl<T: Transport> Transport for Trace<T> {
         let ms = debut.elapsed().as_millis();
         match &r {
             Ok(rep) => {
-                let octets: String = rep.data.iter().take(48).map(|b| format!(" {b:02x}")).collect();
+                let octets: String = masquer_vin(&rep.data)
+                    .iter()
+                    .take(48)
+                    .map(|b| format!(" {b:02x}"))
+                    .collect();
                 eprintln!(
                     "> {req}\n< état {:02x} [{} o]{octets}  ({ms} ms)",
                     rep.etat,
@@ -182,6 +203,26 @@ impl<T: Transport + ?Sized> Transport for Box<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vin_masque() {
+        assert_eq!(
+            masquer_vin(b"\x61\xb0VF7AB123CD4567890\x00"),
+            b"\x61\xb0VF7XXXXXXXXXX7890\x00"
+        );
+        assert_eq!(
+            masquer_vin(b"VF7AB123CD456789"),
+            b"VF7AB123CD456789",
+            "16 caractères : pas un VIN"
+        );
+        assert_eq!(
+            masquer_vin(b"VF7AB123CD45O7890"),
+            b"VF7AB123CD45O7890",
+            "O n'est pas dans l'alphabet VIN"
+        );
+        assert_eq!(masquer_vin(b"9644674580"), b"9644674580");
+        assert!(masquer_vin(b"").is_empty());
+    }
 
     #[test]
     fn blocs() {
