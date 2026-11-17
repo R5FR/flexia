@@ -4,6 +4,7 @@
 pub mod garde;
 
 use garde::Refus;
+use psa_data::bsi::{Composition, DefautsBsi, Ini};
 use psa_data::defauts::TableBits;
 use psa_data::descr::{self, Cmd68k};
 use psa_data::gpc::Gpc;
@@ -22,6 +23,9 @@ pub const PAUSE_APRES_DEMARRAGE: std::time::Duration = std::time::Duration::from
 pub const STATUT_REPOS: [u8; 2] = [0, 0];
 /// Statut de la VCI pendant une session calculateur (constaté : la VCI entretient elle-même la session).
 pub const STATUT_SESSION: [u8; 2] = [1, 0];
+
+/// Zones de la BSI lues : zone -> données (après `61 zone`).
+pub type ZonesLues = BTreeMap<u8, Vec<u8>>;
 
 /// Commandes système de la VCI utilisées.
 pub mod sys {
@@ -588,6 +592,75 @@ impl<'a, T: Transport> Session<'a, T> {
             self.commande(canal, "GENERIQUE_HN", &[0x17, 0xFF, 0x00])?
         };
         decode_defauts(rep.kwp())
+    }
+
+    /// Composition des zones de la BSI, téléchargée comme Lexia à l'ouverture : commande `MAPPING` (service
+    /// `35`, téléchargement depuis la BSI : une lecture) pour chaque famille, bloc après bloc jusqu'au bloc marqué
+    /// `ff`. Rend aussi les réponses KWP, dans l'ordre.
+    pub fn composition_bsi(&mut self, canal: &Canal, familles: &[u8]) -> Result<(Composition, Vec<Vec<u8>>)> {
+        let mut reponses = Vec::new();
+        for &f in familles {
+            let mut fin = false;
+            for bloc in 1..=u8::MAX {
+                let rep = self.commande(canal, "MAPPING", &[f, 0, 0, bloc])?;
+                let k = rep.kwp();
+                if k.len() < 7 || k[0] != 0x75 || k[1] != f || k[5] != bloc {
+                    return Err(Error::Reponse(format!("MAPPING {f:02x} bloc {bloc} : {:02x?}", &k[..k.len().min(8)])));
+                }
+                fin = k[2] != 0x80;
+                reponses.push(k.to_vec());
+                if fin {
+                    break;
+                }
+            }
+            if !fin {
+                return Err(Error::Reponse(format!("MAPPING {f:02x} : pas de dernier bloc")));
+            }
+        }
+        Ok((Composition::depuis_mapping(reponses.iter().map(Vec::as_slice)), reponses))
+    }
+
+    /// Données d'une zone de la BSI (`LEC_TRM` + zone ; réponse `61 zone …`), sans `61 zone` ; `None` si la BSI
+    /// refuse la zone (`7f 21 …`, ex. zone 83 sur la C5).
+    pub fn zone_bsi(&mut self, canal: &Canal, lid: u8) -> Result<Option<Vec<u8>>> {
+        match self.commande(canal, "LEC_TRM", &[lid]) {
+            Ok(r) => match r.kwp() {
+                [0x61, z, d @ ..] if *z == lid => Ok(Some(d.to_vec())),
+                k => Err(Error::Reponse(format!("zone {lid:02x} : {:02x?}", &k[..k.len().min(4)]))),
+            },
+            Err(Error::Negative { service: 0x21, .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Défauts de la BSI, lus comme CAL264 `LECTDEF3020` : zones 83, 84, 88, 87 (une zone refusée est absente),
+    /// puis décodage par la composition et la table des codes. Codes méthode, triés.
+    pub fn lire_defauts_bsi(
+        &mut self,
+        canal: &Canal,
+        composition: &Composition,
+        ini: &Ini,
+        defauts: &DefautsBsi,
+    ) -> Result<(Vec<Defaut>, ZonesLues)> {
+        let mut trames = BTreeMap::new();
+        for lid in psa_data::bsi::ZONES_DEFAUTS {
+            if let Some(d) = self.zone_bsi(canal, lid)? {
+                trames.insert(lid, d);
+            }
+        }
+        let liste = defauts
+            .decoder(&trames, composition, ini)
+            .map_err(|e| Error::Donnee(format!("défauts de la BSI : {e}")))?;
+        let d = liste
+            .into_iter()
+            .map(|d| Defaut {
+                code: d.code,
+                brut: 0,
+                statut: u8::from(d.etat == 'F'),
+                methode: true,
+            })
+            .collect();
+        Ok((d, trames))
     }
 
     /// Lit une trame de mesures (`LEC_TRM` + requête de la trame) et décode ses fiches.

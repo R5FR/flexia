@@ -215,7 +215,6 @@ fn bsi_ouverture_et_zone_vin() {
     for nom in [
         "TELECODAGE",
         "TELECODAGE1",
-        "MAPPING",
         "ACTIVATION",
         "EFFACE_DEFAUTS",
         "RESET_ECU",
@@ -226,10 +225,86 @@ fn bsi_ouverture_et_zone_vin() {
             "{nom}"
         );
     }
-    for nom in ["WRITE_MODE_FONC", "ECR_PROTECT", "ECR_CONFIG"] {
+    // MAPPING (service 35, lecture) n'est permise que sous la forme « famille 00 00 bloc »
+    for nom in ["WRITE_MODE_FONC", "ECR_PROTECT", "ECR_CONFIG", "MAPPING"] {
         assert!(matches!(s.commande(&canal, nom, &[0]), Err(Error::Refus(_))), "{nom}");
     }
     assert_eq!(s.transport().position(), avant);
+}
+
+/// BSI de la C5 comme Lexia au test global du 2026-11-13 (session de 18:27:54) : ouverture, composition des
+/// zones téléchargée (`MAPPING`, 31 échanges), identification, zones b1, b2, b0 ; puis lecture des zones de
+/// défauts de la session précédente (83 et 88 refusées par la BSI, 84 et 87 à zéro) et fin.
+#[test]
+fn bsi_composition_zones_et_defauts() {
+    let Some((gpc, _, mut rejeu)) = donnees() else {
+        return;
+    };
+    let Some(lexia) = env("FLEXIA_LEXIA") else {
+        return;
+    };
+    let ini = psa_data::bsi::Ini::charger(lexia.join("DATA").join("BSI.ini")).unwrap();
+    let debut = rejeu.aller_a_heure("18:27:54.40").unwrap();
+    let mut s = Session::new(rejeu, &gpc);
+    let bsi = s.ouvrir(psa_data::bsi::TYPE_BSI_X4).unwrap();
+    assert_eq!(s.transport().position(), debut + 5, "fe, C_, P_ en deux blocs, INIT");
+    let (comp, reponses) = s.composition_bsi(&bsi, &psa_data::bsi::FAMILLES).unwrap();
+    assert_eq!(reponses.len(), 31, "C0 ×9, B0 ×7, D0, A0, 83 ×13");
+    let zones: Vec<u8> = comp.zones().collect();
+    for z in [0x84, 0x86, 0x87, 0xb0, 0xb1, 0xb2, 0xc9, 0xca, 0xd0] {
+        assert!(zones.contains(&z), "zone {z:02x}");
+    }
+    assert!(!comp.contient(0x83) && !comp.contient(0x88), "zones refusées par cette BSI");
+    let taille = |z: u8| comp.taille(z, &ini).unwrap();
+    assert_eq!((taille(0x84), taille(0x87), taille(0xb1), taille(0xb2), taille(0xb0)), (13, 1, 8, 13, 17));
+    s.identification(&bsi).unwrap();
+    // zones lues par Lexia après l'identification : tailles conformes à la composition
+    let mut lues = Vec::new();
+    for z in [0xb1, 0xb2, 0xb0, 0xb1] {
+        let d = s.zone_bsi(&bsi, z).unwrap().unwrap();
+        assert_eq!(d.len(), taille(z), "zone {z:02x}");
+        lues.push((z, d));
+    }
+    assert_eq!(s.statut().unwrap(), [1, 0]);
+    // options de la BSI (zone b2), si le dictionnaire des paramètres est donné
+    if let Some(p) = env("FLEXIA_BSI_PARAMETRES") {
+        let dico = psa_data::bsi::DictionnaireBsi::charger(p).unwrap();
+        let b2 = &lues[1].1;
+        let v = dico.valeurs(0xb2, b2, &comp, &ini).unwrap();
+        let val = |nom: &str| v.iter().find(|(p, _)| p.nom == nom).map(|(_, x)| x.clone());
+        use psa_data::bsi::Valeur::Nombre;
+        assert_eq!(val("OPTCLIM"), Some(Nombre(1.0)));
+        assert_eq!(val("OPTCAPTEURPLUIE"), Some(Nombre(1.0)));
+        assert_eq!(val("OPTBVA"), Some(Nombre(0.0)));
+        // zone c9, trame fabriquée : température d'eau 0x7b -> 83 °C (CAL264, conversion 9 : x - 40)
+        let champs = comp.champs(0xc9, &ini).unwrap();
+        let eau = champs.iter().find(|c| c.rang == 0x24).unwrap();
+        let mut c9 = vec![0u8; taille(0xc9)];
+        c9[eau.position] = 0x7b;
+        let v = dico.valeurs(0xc9, &c9, &comp, &ini).unwrap();
+        let eau = v.iter().find(|(p, _)| p.nom == "TEMPEAU").map(|(_, x)| x.clone());
+        assert_eq!(eau, Some(Nombre(83.0)));
+    }
+    // zones de défauts, lues dans la session précédente (même BSI, même composition)
+    s.transport_mut().aller_a_heure("18:27:54.11").unwrap();
+    let defauts = match env("FLEXIA_BSI_DEFAUTS") {
+        Some(p) => psa_data::bsi::DefautsBsi::charger(p).unwrap(),
+        None => psa_data::bsi::DefautsBsi::default(),
+    };
+    let (d, trames) = s.lire_defauts_bsi(&bsi, &comp, &ini, &defauts).unwrap();
+    assert!(d.is_empty(), "aucun défaut BSI le 13/11 : {d:?}");
+    assert_eq!(trames.keys().copied().collect::<Vec<_>>(), [0x84, 0x87]);
+    assert_eq!(trames[&0x84], vec![0; 13]);
+    if !defauts.is_empty() {
+        // bit d'indice 16 de la zone 84 = rang c9 dans cette composition -> 2CZ (CAL264, en émulation)
+        let mut t = trames.clone();
+        t.get_mut(&0x84).unwrap()[2] = 0x01;
+        let d = defauts.decoder(&t, &comp, &ini).unwrap();
+        assert_eq!(d.iter().map(|d| (d.code.as_str(), d.rang)).collect::<Vec<_>>(), [("2CZ", 0xc9)]);
+        assert_eq!(defauts.table_libelles("CITROENC5"), Some("MENU906N"));
+    }
+    assert!(s.fermer(bsi).unwrap(), "FIN_DIAG de la BSI, puis statut 00 00");
+    assert_eq!(s.transport().echanges()[s.transport().position() - 1].heure, "18:27:54.400");
 }
 
 /// Écran « identification » de Lexia du 2026-11-13 à 18:31 : mêmes trois lectures, mêmes sept valeurs.

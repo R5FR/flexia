@@ -16,7 +16,7 @@ pub const SYSTEME_AUTORISE: [u8; 8] = [0x04, 0x05, 0x07, 0x09, 0x0b, 0x12, 0xfa,
 pub const SERVICES_AUTORISES: [u8; 7] = [0x81, 0x82, 0x3E, 0x17, 0x18, 0x21, 0x1A];
 
 /// Noms de commande refusés quel que soit leur service.
-pub const NOMS_REFUSES: [&str; 14] = [
+pub const NOMS_REFUSES: [&str; 13] = [
     "TELECODAGE",
     "PILOTAGE",
     "EFFACE_DEFAUTS",
@@ -30,8 +30,29 @@ pub const NOMS_REFUSES: [&str; 14] = [
     "ACTIVATION",
     "SECURITY_ACCESS_1",
     "SECURITY_ACCESS_2",
-    "MAPPING",
 ];
+
+/// `MAPPING` de la BSI : seule commande autorisée hors [`SERVICES_AUTORISES`], et seulement sous cette forme.
+/// Service `35` (RequestUpload : téléchargement *depuis* le calculateur, une lecture) ; Lexia l'envoie à chaque
+/// ouverture de la BSI pour connaître la composition de ses zones (capture du 2026-11-13, 31 échanges par
+/// session). Enregistrements `D` du descripteur `P_BSIGEN` (constatés) : `35`, les quatre octets des données,
+/// puis `11`.
+pub const MAPPING_D: [&str; 6] = ["E35", "E--1  1 ", "E--1  2 ", "E--1  3 ", "E--1  4 ", "E11"];
+/// Familles de zones que `MAPPING` peut demander (`LISTEINI.INI`, `[BSI] FamillesLID`).
+pub const FAMILLES_MAPPING: [u8; 5] = [0xC0, 0xB0, 0xD0, 0xA0, 0x83];
+
+/// Autorise `MAPPING` si son descripteur et ses données ont exactement la forme vue sur la capture :
+/// `famille 00 00 bloc`, bloc de 1 à 255.
+fn mapping(desc: Option<&Cmd68k>, data: &[u8]) -> Result<(), Refus> {
+    let forme = desc.is_some_and(|c| c.d.iter().map(String::as_str).eq(MAPPING_D));
+    if !forme {
+        return Err(Refus::ServiceInconnu("MAPPING : descripteur différent de celui de la BSI".into()));
+    }
+    match data {
+        [f, 0, 0, b] if FAMILLES_MAPPING.contains(f) && *b >= 1 => Ok(()),
+        _ => Err(Refus::ServiceInconnu(format!("MAPPING : données {data:02x?} hors de la forme famille 00 00 bloc"))),
+    }
+}
 
 /// Débuts de nom refusés : écritures, effacements, téléchargements, pilotages (ex. `TELECODAGE1`,
 /// `ECR_CONFIG`, `ECRITURE_ZONE_HIST`, `WRITE_MODE_FONC`, `EFFACE_FLASH_STATUS`).
@@ -124,6 +145,9 @@ pub fn service_trame_complete(data: &[u8]) -> Option<u8> {
 pub fn commande(nom: &str, desc: Option<&Cmd68k>, data: &[u8]) -> Result<(), Refus> {
     if nom_refuse(nom) {
         return Err(Refus::Nom(nom.to_string()));
+    }
+    if nom == "MAPPING" {
+        return mapping(desc, data);
     }
     // Certains protocoles (BSI) n'ont pas de descripteur pour INIT : la base fournit la trame complète
     // (`81 d0 f1 81 c3`, constaté sur capture). Seul INIT a droit à cette forme, et elle est vérifiée.
@@ -227,6 +251,24 @@ mod tests {
         }
         // un nom de lecture ne protège pas : le service est toujours contrôlé
         assert_eq!(commande("LEC_TRM", Some(&d(&["E3B"])), &[]), Err(Refus::Service(0x3B)));
+    }
+
+    #[test]
+    fn mapping_de_la_bsi() {
+        let bsi = d(&MAPPING_D);
+        assert!(commande("MAPPING", Some(&bsi), &[0xc0, 0, 0, 1]).is_ok());
+        assert!(commande("MAPPING", Some(&bsi), &[0x83, 0, 0, 0x0d]).is_ok());
+        // famille inconnue, bloc 0, bloc au-delà de 255, longueur différente
+        for data in [&[0x84, 0, 0, 1][..], &[0xc0, 0, 0, 0], &[0xc0, 0, 1, 0], &[0xc0, 0, 0], &[0xc0, 0, 0, 1, 0x11]] {
+            assert!(matches!(commande("MAPPING", Some(&bsi), data), Err(Refus::ServiceInconnu(_))), "{data:02x?}");
+        }
+        // descripteur d'une autre forme (même service 35, ou téléchargement vers le calculateur) : refusé
+        for autre in [d(&["E35", "E--1  1+"]), d(&["E34", "E--1  1 ", "E--1  2 ", "E--1  3 ", "E--1  4 ", "E11"])] {
+            assert!(commande("MAPPING", Some(&autre), &[0xc0, 0, 0, 1]).is_err());
+        }
+        assert!(commande("MAPPING", None, &[0xc0, 0, 0, 1]).is_err());
+        // le service 35 reste refusé sous tout autre nom
+        assert_eq!(commande("LEC_TRM", Some(&bsi), &[0xc0, 0, 0, 1]), Err(Refus::Service(0x35)));
     }
 
     #[test]

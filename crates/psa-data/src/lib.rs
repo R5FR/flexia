@@ -1,6 +1,7 @@
 //! Lecture seule des données PSA, dans la copie du pack de l'utilisateur.
 //! Rien n'est embarqué dans le binaire : tout est lu au lancement.
 //!
+//! - [`bsi`] : zones de la BSI (composition téléchargée, paramètres et défauts de CAL264) ;
 //! - [`ods10`] : bases Firebird / InterBase ODS 10, sans moteur Firebird ;
 //! - [`dico`] : dictionnaires de libellés `.DBZ` / `.ZCL` ;
 //! - [`gpc`] : base véhicule (calculateurs, commandes nommées, protocoles) ;
@@ -10,6 +11,7 @@
 //! - [`defauts`] : défauts en champs de bits des modules `CAL<n>` (dictionnaire TSV) ;
 //! - [`dbf`] : tables dBase de la documentation (libellés de ces défauts).
 
+pub mod bsi;
 pub mod dbf;
 pub mod defauts;
 pub mod descr;
