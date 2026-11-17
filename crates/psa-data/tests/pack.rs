@@ -224,3 +224,47 @@ fn libelle_defaut_p0420() {
     }
     assert!(n >= 173, "{n}");
 }
+
+/// Habillage des mesures de l'injection dans la base : libellés, unités, formats et états de Lexia.
+#[test]
+fn parametres_injection() {
+    use psa_data::gpc::Gpc;
+    use psa_data::libelles::Dicos;
+    let (Some(fdb), Some(lx)) = (dossier("FLEXIA_FDB"), dossier("FLEXIA_LEXIA")) else {
+        return;
+    };
+    let g = Gpc::open(fdb.join("GPC.FDB")).unwrap();
+    let dicos = Dicos::new(lx.join("DICO"), "FR");
+    let p = g.parametres(356).unwrap();
+    assert_eq!(p.len(), 52);
+    let par = |n: &str| p.iter().find(|x| x.nom == n).unwrap();
+    let txt = |brut: &str| dicos.libelle(brut).to_string();
+    let regime = par("REGIMEMOTEUR");
+    assert_eq!(
+        (txt(&regime.libelle), txt(&regime.unite), regime.format.as_str()),
+        ("Régime moteur".into(), "tr/min".into(), "1.0")
+    );
+    let tension = par("TENSIONBATTERIE");
+    assert_eq!(
+        (txt(&tension.libelle), txt(&tension.unite), tension.format.as_str()),
+        ("Tension batterie".into(), "Volt(s)".into(), "1.2")
+    );
+    assert_eq!(txt(&par("TEMPSINJECTION").libelle), "Temps d'injection");
+    let richesse: Vec<(f64, String)> = par("ETATREGULRICHESSE")
+        .valeurs
+        .iter()
+        .map(|(v, t)| (*v, txt(t)))
+        .collect();
+    assert_eq!(
+        richesse,
+        [(0.0, "Boucle ouverte".to_string()), (1.0, "Boucle fermée".to_string())]
+    );
+    let fournisseur = par("FOURNISSEUR")
+        .valeurs
+        .iter()
+        .find(|(v, _)| *v == 5.0)
+        .map(|(_, t)| txt(t));
+    assert_eq!(fournisseur.as_deref(), Some("SAGEM/JCAE"));
+    assert_eq!(txt(&par("REF_PSA").libelle), "Référence PSA");
+    assert!(g.parametres(999_999).unwrap().is_empty());
+}

@@ -6,7 +6,7 @@
 
 use crate::ods10::{col, Database, Row, Value};
 use crate::{Error, Result};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 /// Type de calculateur (`ECUTYPE`) ; `id` est le `n` de `CAL<n>.DLL`.
@@ -84,6 +84,22 @@ pub struct Gpc {
     pub protocols: Vec<Protocol>,
     /// (type de calculateur, code défaut en hexadécimal majuscule) → libellés bruts distincts de `FAULT.FAULIB`.
     defauts: BTreeMap<(i64, String), Vec<String>>,
+    /// La base reste ouverte pour les lectures à la demande ([`Gpc::parametres`]).
+    db: Database,
+}
+
+/// Paramètre d'un écran de Lexia (`PARAM`) : l'habillage d'une mesure ou d'un champ d'identification.
+/// Les textes sont bruts, à résoudre avec [`crate::libelles`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct Parametre {
+    /// Nom interne, celui des fiches des modules `CAL<n>` (ex. `REGIMEMOTEUR`).
+    pub nom: String,
+    pub libelle: String,
+    pub unite: String,
+    /// Format d'affichage `chiffres.décimales`, ex. `1.2` ; vide si absent.
+    pub format: String,
+    /// Valeurs discrètes : (valeur, texte brut), ex. (1, « Boucle fermée »).
+    pub valeurs: Vec<(f64, String)>,
 }
 
 fn int(r: &Row, name: &str) -> Option<i64> {
@@ -104,10 +120,10 @@ fn bytes(r: &Row, name: &str) -> Vec<u8> {
 
 impl Gpc {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        Self::from_db(&Database::open(path)?)
+        Self::from_db(Database::open(path)?)
     }
 
-    pub fn from_db(db: &Database) -> Result<Self> {
+    pub fn from_db(db: Database) -> Result<Self> {
         let vehicules = db
             .rows("VEHICULE", false)?
             .iter()
@@ -240,7 +256,85 @@ impl Gpc {
             commands,
             protocols,
             defauts,
+            db,
         })
+    }
+
+    /// Paramètres des écrans d'un type de calculateur (libellé, unité, format, valeurs discrètes), par nom.
+    /// Lecture à la demande : `SCREEN` → `I_SCRPAR` → `PARAM` → `I_PARDIS` → `DISCVAL`. Quand la base a
+    /// plusieurs variantes d'un même nom (`PARIDCONF`), la première (configuration la plus basse) est gardée.
+    pub fn parametres(&self, ecu_type_id: i64) -> Result<Vec<Parametre>> {
+        let texte = |r: &Row, name: &str| match col(r, name) {
+            Some(Value::Text(t)) => t.clone(),
+            Some(Value::Bytes(b)) => crate::text::decode(b, crate::text::Codepage::Cp1252),
+            _ => String::new(),
+        };
+        let ecus: HashSet<i64> = self
+            .ecus
+            .iter()
+            .filter(|e| e.ecu_type_id == ecu_type_id)
+            .map(|e| e.id)
+            .collect();
+        let ecrans: HashSet<i64> = self
+            .db
+            .rows_cle("SCREEN", false, "ECUID", &ecus)?
+            .iter()
+            .filter_map(|r| int(r, "SCRID"))
+            .collect();
+        let ids: HashSet<i64> = self
+            .db
+            .rows_cle("I_SCRPAR", false, "SCRID", &ecrans)?
+            .iter()
+            .filter_map(|r| int(r, "PARID"))
+            .collect();
+        // une ligne par nom : la configuration la plus basse
+        let mut par_nom: BTreeMap<String, (i64, i64, Parametre)> = BTreeMap::new();
+        for r in &self.db.rows_cle("PARAM", true, "PARID", &ids)? {
+            let (Some(id), nom) = (int(r, "PARID"), text(r, "PARNAME")) else {
+                continue;
+            };
+            let conf = int(r, "PARIDCONF").unwrap_or(0);
+            if nom.is_empty() || par_nom.get(&nom).is_some_and(|(c, _, _)| *c <= conf) {
+                continue;
+            }
+            let p = Parametre {
+                nom: nom.clone(),
+                libelle: texte(r, "PARLIBMP"),
+                unite: texte(r, "PARLIBUNIT"),
+                format: text(r, "PARFORMAT"),
+                valeurs: Vec::new(),
+            };
+            par_nom.insert(nom, (conf, id, p));
+        }
+        let gardes: HashSet<i64> = par_nom.values().map(|(_, id, _)| *id).collect();
+        let liens: Vec<(i64, i64)> = self
+            .db
+            .rows_cle("I_PARDIS", false, "PARID", &gardes)?
+            .iter()
+            .filter_map(|r| Some((int(r, "PARID")?, int(r, "DISCID")?)))
+            .collect();
+        let disc: HashSet<i64> = liens.iter().map(|(_, d)| *d).collect();
+        let valeurs: HashMap<i64, (f64, String)> = self
+            .db
+            .rows_cle("DISCVAL", true, "DISCID", &disc)?
+            .iter()
+            .filter_map(|r| {
+                let v = col(r, "DISCVALCOM").and_then(Value::as_f64)?;
+                Some((int(r, "DISCID")?, (v, texte(r, "DISCVALLIB"))))
+            })
+            .collect();
+        Ok(par_nom
+            .into_values()
+            .map(|(_, id, mut p)| {
+                p.valeurs = liens
+                    .iter()
+                    .filter(|(pid, _)| *pid == id)
+                    .filter_map(|(_, d)| valeurs.get(d).cloned())
+                    .collect();
+                p.valeurs.sort_by(|a, b| a.0.total_cmp(&b.0));
+                p
+            })
+            .collect())
     }
 
     /// Libellés bruts d'un code défaut (hexadécimal, ex. `0420`) pour un type de calculateur ; à résoudre

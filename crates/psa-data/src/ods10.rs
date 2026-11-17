@@ -11,7 +11,7 @@
 
 use crate::text::{decode, Codepage};
 use crate::{rd, Error, Result};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 const PAGE_DATA: u8 = 5;
@@ -285,6 +285,13 @@ impl Value {
             _ => None,
         }
     }
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Value::Float(v) => Some(*v),
+            Value::Int(v) => Some(*v as f64),
+            _ => None,
+        }
+    }
     pub fn as_bytes(&self) -> Option<&[u8]> {
         match self {
             Value::Bytes(b) => Some(b),
@@ -481,6 +488,35 @@ impl Database {
         let mut out = Vec::new();
         for r in self.ods.records(rid as u16)? {
             let f = self.fmt(rid, i16::from(r.format))?;
+            let mut row = Row::with_capacity(f.len());
+            for (i, d) in f.iter().enumerate() {
+                let name = names.get(i).map_or_else(|| format!("F{i}"), |n| n.to_string());
+                row.push((name, self.value(&r.data, d, i, blobs)?));
+            }
+            out.push(row);
+        }
+        Ok(out)
+    }
+
+    /// Lignes d'une table dont la colonne entière `colonne` vaut une des `cles`. Seule cette colonne est
+    /// décodée pour les autres lignes : c'est le moyen de lire quelques lignes, blobs compris, d'une grande table.
+    pub fn rows_cle(&self, table: &str, blobs: bool, colonne: &str, cles: &HashSet<i64>) -> Result<Vec<Row>> {
+        let rid = self.rel_id(table)?;
+        let names = self.columns(table);
+        let Some(k) = names.iter().position(|n| *n == colonne) else {
+            return Err(Error::Format(format!("colonne inconnue : {table}.{colonne}")));
+        };
+        let mut out = Vec::new();
+        for r in self.ods.records(rid as u16)? {
+            let f = self.fmt(rid, i16::from(r.format))?;
+            let Some(d) = f.get(k) else { continue };
+            if !self
+                .value(&r.data, d, k, false)?
+                .as_i64()
+                .is_some_and(|v| cles.contains(&v))
+            {
+                continue;
+            }
             let mut row = Row::with_capacity(f.len());
             for (i, d) in f.iter().enumerate() {
                 let name = names.get(i).map_or_else(|| format!("F{i}"), |n| n.to_string());
