@@ -294,3 +294,31 @@ fn passerelle_c5() {
     );
     assert!(g.passerelle(246, Some("INCONNU")).is_none());
 }
+
+/// Reconnaissance du test global (`RECO`) : l'identification de l'injection de la C5 du 2026-11-13 désigne les
+/// types S2000PM1 356 et 389 (moteur MO6FZ), aucun autre calculateur de la C5.
+#[test]
+fn reconnaissance_injection_c5() {
+    use psa_data::gpc::Gpc;
+    use std::collections::HashSet;
+    let Some(fdb) = dossier("FLEXIA_FDB") else {
+        return;
+    };
+    let g = Gpc::open(fdb.join("GPC.FDB")).unwrap();
+    let veh = g.vehicule("CITROENC5").unwrap();
+    let ecus = g.ecus_of_vehicule(veh.id);
+    let ids: HashSet<i64> = ecus.iter().map(|(_, e, _)| e.id).collect();
+    let reco = g.reconnaissances(&ids).unwrap();
+    let ident = [
+        0x61, 0x80, 0x96, 0x44, 0x67, 0x45, 0x80, 0x00, 0x05, 0x96, 0x55, 0x21, 0x26, 0x80, 0xff, 0xff, 0xff, 0xff,
+        0x0d, 0x01, 0xff, 0xff, 0xff, 0xff,
+    ];
+    let mut types: Vec<(i64, String)> = reco
+        .iter()
+        .filter(|r| r.correspond(&ident))
+        .filter_map(|r| ecus.iter().find(|(_, e, _)| e.id == r.ecu_id).map(|(_, _, t)| (t.id, r.port.clone())))
+        .collect();
+    types.sort();
+    types.dedup();
+    assert_eq!(types, [(356, "MO6FZ".to_string()), (389, "MO6FZ".to_string())]);
+}

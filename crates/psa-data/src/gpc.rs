@@ -105,6 +105,26 @@ pub struct Parametre {
     pub valeurs: Vec<(f64, String)>,
 }
 
+/// Identification attendue d'un calculateur (`RECO`), pour reconnaître son type au test global.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reconnaissance {
+    pub ecu_id: i64,
+    /// Trame d'identification attendue (`61 80 …` sur 24 octets) ; un octet nul est un joker.
+    pub trame: Vec<u8>,
+    /// Variante (ex. moteur `MO6FZ`), vide si absente.
+    pub port: String,
+}
+
+impl Reconnaissance {
+    /// Vrai si la réponse d'identification (KWP, `61 80 …`) correspond : chaque octet non nul de la trame attendue
+    /// est égal à celui de la réponse. [C] La C5 du 2026-11-13 (références 9644674580 et 9655212680) correspond à
+    /// une ligne du type 356 (et du 389), les octets du fournisseur et de `61 80` étant des jokers.
+    pub fn correspond(&self, ident: &[u8]) -> bool {
+        self.trame.iter().any(|&b| b != 0)
+            && self.trame.iter().enumerate().all(|(i, &b)| b == 0 || ident.get(i) == Some(&b))
+    }
+}
+
 fn int(r: &Row, name: &str) -> Option<i64> {
     col(r, name).and_then(Value::as_i64)
 }
@@ -382,6 +402,29 @@ impl Gpc {
         self.vehicules
             .iter()
             .find(|v| v.com_type.eq_ignore_ascii_case(com_type))
+    }
+
+    /// Identifications attendues des calculateurs donnés (`RECO`, lue à la demande) : par calculateur (`ECUID`),
+    /// trame de `RECTRAMEIDF` et nom de `RECPORTNAME` (ex. moteur `MO6FZ`).
+    pub fn reconnaissances(&self, ecu_ids: &HashSet<i64>) -> Result<Vec<Reconnaissance>> {
+        Ok(self
+            .db
+            .rows_cle("RECO", false, "ECUID", ecu_ids)?
+            .iter()
+            .filter_map(|r| {
+                let h = text(r, "RECTRAMEIDF");
+                let trame = (0..h.len())
+                    .step_by(2)
+                    .map(|i| h.get(i..i + 2).and_then(|x| u8::from_str_radix(x, 16).ok()))
+                    .collect::<Option<Vec<u8>>>()?;
+                let ecu_id = int(r, "ECUID")?;
+                (!trame.is_empty()).then(|| Reconnaissance {
+                    ecu_id,
+                    trame,
+                    port: text(r, "RECPORTNAME"),
+                })
+            })
+            .collect())
     }
 
     /// Calculateurs possibles d'un véhicule : (famille, calculateur, type).
